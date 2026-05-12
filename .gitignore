@@ -3,3 +3,7 @@ env/
 .env
 Data.xlsx
 __pycache__/
+
+# local embedding cache (too large for GitHub)
+embeddings_cache.npy
+embeddings_cache.npy.meta.json

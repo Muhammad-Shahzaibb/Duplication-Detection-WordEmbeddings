@@ -1,0 +1,12 @@
+pandas
+openpyxl
+rapidfuzz 
+tqdm
+streamlit
+numpy
+faiss-cpu
+sentence-transformers
+psycopg[binary]
+fastapi
+uvicorn[standard]
+pydantic
