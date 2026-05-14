@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from Config import (
+    ITEM_MASTER_APPROVAL_VIEW,
     ITEM_MASTER_VIEW,
     PG_DATABASE,
     PG_HOST,
@@ -106,3 +107,10 @@ def fetch_item_master_rows_from_view(
             pass
 
     return out
+
+
+def fetch_item_master_rows_from_approval_view(
+    **kwargs: Any,
+) -> list[tuple[Any, Any, Any, Any]]:
+    """Same columns/order as main Item Master view, from the approval queue view."""
+    return fetch_item_master_rows_from_view(**kwargs, view=ITEM_MASTER_APPROVAL_VIEW)

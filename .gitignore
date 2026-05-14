@@ -7,3 +7,5 @@ __pycache__/
 # local embedding cache (too large for GitHub)
 embeddings_cache.npy
 embeddings_cache.npy.meta.json
+Approval_embedding_cache.npy
+Approval_embedding_cache.npy.meta.json
