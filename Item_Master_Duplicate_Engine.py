@@ -1,11 +1,40 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
-from embeddings import EMBED_BATCH, EMBED_CACHE_FILE, EMBED_MODEL, build_faiss_index, find_exact_duplicate_groups
+from embeddings import (
+    CacheAction,
+    EMBED_BATCH,
+    EMBED_CACHE_FILE,
+    EMBED_MODEL,
+    build_faiss_index,
+    describe_embedding_cache_action,
+    find_exact_duplicate_groups,
+)
 from jsonify import clean_str, row_to_schema_json, schema_records_to_minimized
+from logging_setup import get_logger
+
+logger = get_logger("style_textile.engine")
+
+
+def _column_match_status(values: list[str]) -> str:
+    """Return 'exact' if all non-empty comparisons match; 'different' if any differ (2+ rows)."""
+    if len(values) < 2:
+        return "exact"
+    normalized = [v.strip().casefold() for v in values]
+    return "exact" if len(set(normalized)) == 1 else "different"
+
+
+def _duplicate_group_column_status(rows_out: list[dict[str, Any]]) -> dict[str, str]:
+    """Per-column exact/different for a duplicate cluster."""
+    return {
+        "ITEM_TYPE": _column_match_status([str(r.get("ITEM_TYPE", "")) for r in rows_out]),
+        "MAINGROUP": _column_match_status([str(r.get("MAINGROUP", "")) for r in rows_out]),
+        "SUBGROUP": _column_match_status([str(r.get("SUBGROUP", "")) for r in rows_out]),
+        "ITEMDESC": "different",
+    }
 
 
 def load_or_build_embeddings_matrix_for_schema_records(
@@ -14,7 +43,7 @@ def load_or_build_embeddings_matrix_for_schema_records(
     cache_path: str | Path,
     embed_model: str | None = None,
     embed_batch: int | None = None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, Literal["reuse", "compute"]]:
     """
     Return the embedding matrix for the given schema rows, reusing ``cache_path`` + ``.meta.json``
     when they match current rows/model/content; otherwise compute and persist.
@@ -22,6 +51,7 @@ def load_or_build_embeddings_matrix_for_schema_records(
     model = embed_model if embed_model is not None else EMBED_MODEL
     batch = embed_batch if embed_batch is not None else EMBED_BATCH
     minimized = schema_records_to_minimized(records)
+    before: CacheAction = describe_embedding_cache_action(minimized, cache_path=str(cache_path), model=model)
     _index, mat = build_faiss_index(
         minimized,
         model=model,
@@ -30,7 +60,8 @@ def load_or_build_embeddings_matrix_for_schema_records(
         reuse_only=False,
         force_recompute=False,
     )
-    return np.asarray(mat, dtype=np.float32)
+    action: Literal["reuse", "compute"] = "reuse" if before == "reuse" else "compute"
+    return np.asarray(mat, dtype=np.float32), action
 
 
 def rebuild_item_master_embeddings_cache(
@@ -141,14 +172,16 @@ def run_item_master_duplicate_engine(
             rows_out.append(
                 {
                     "row#": m + 1,
-                    "ITEM_TYPE": clean_str(rec.get("item_type", "")),
-                    "MAINGROUP": clean_str(rec.get("main_group", "")),
-                    "SUBGROUP": clean_str(rec.get("sub_group", "")),
+                    "ITEM_TYPE": clean_str(rec.get("_item_type", "")),
+                    "MAINGROUP": clean_str(rec.get("_main_group", "")),
+                    "SUBGROUP": clean_str(rec.get("_sub_group", "")),
                     "ITEMDESC": clean_str(rec.get("_item_description", "")),
                 }
             )
-        # Fixed: variation within a duplicate group is evaluated on ITEMDESC vs hierarchy keys.
-        duplicates[dup_id] = {"status": "ITEMDESC", "records": rows_out}
+        duplicates[dup_id] = {
+            "status": _duplicate_group_column_status(rows_out),
+            "records": rows_out,
+        }
 
     return {
         "total_records": total,

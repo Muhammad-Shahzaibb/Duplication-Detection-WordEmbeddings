@@ -13,17 +13,10 @@ from typing import Any
 import pandas as pd
 
 # ─────────────────────────────────────────────
-#  Minimal JSON schema (3 hierarchy + 2 keys from ITEMDESC)
+#  Minimal JSON schema — ITEMDESC only (order-invariant text + numeric)
 # ─────────────────────────────────────────────
 
-REGEX_SCHEMA_KEYS: tuple[str, ...] = (
-    "item_type",
-    "main_group",
-    "sub_group",
-    # Two-key normalization to make word-order duplicates converge
-    "text",
-    "numeric",
-)
+REGEX_SCHEMA_KEYS: tuple[str, ...] = ("text", "numeric")
 
 REGEX_EXTRACTION_KEYS: tuple[str, ...] = ("text", "numeric")
 
@@ -274,18 +267,23 @@ def regex_extract_attributes(desc: str) -> dict[str, str]:
 
 def row_to_schema_json(
     *,
-    item_type: Any,
-    main_group: Any,
-    sub_group: Any,
     item_description: Any,
+    item_type: Any = "",
+    main_group: Any = "",
+    sub_group: Any = "",
 ) -> dict[str, str]:
-    """Convert one row into a base JSON object (ITEMDESC stored temporarily as `_item_description`)."""
-    out: dict[str, Any] = {k: None for k in REGEX_SCHEMA_KEYS}
-    out["item_type"] = clean_str(item_type)
-    out["main_group"] = clean_str(main_group)
-    out["sub_group"] = clean_str(sub_group)
-    out["_item_description"] = clean_str(item_description)
-    return out
+    """
+    Convert one row into a base record for the pipeline.
+
+    Only ITEMDESC is used for JSON minimization and embeddings (``text`` / ``numeric``).
+    Hierarchy columns are kept as ``_item_*`` for duplicate-engine output only.
+    """
+    return {
+        "_item_description": clean_str(item_description),
+        "_item_type": clean_str(item_type),
+        "_main_group": clean_str(main_group),
+        "_sub_group": clean_str(sub_group),
+    }
 
 
 def dataframe_to_schema_jsons(
@@ -342,7 +340,8 @@ def write_jsonl(rows: list[dict[str, str]], out_path: str | Path) -> Path:
     with out_path.open("w", encoding="utf-8") as f:
         for obj in rows:
             obj = dict(obj)
-            obj.pop("_item_description", None)
+            for k in ("_item_description", "_item_type", "_main_group", "_sub_group"):
+                obj.pop(k, None)
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
     return out_path
 
@@ -353,7 +352,8 @@ def write_json(rows: list[dict[str, str]], out_path: str | Path) -> Path:
     cleaned: list[dict[str, Any]] = []
     for obj in rows:
         o = dict(obj)
-        o.pop("_item_description", None)
+        for k in ("_item_description", "_item_type", "_main_group", "_sub_group"):
+            o.pop(k, None)
         cleaned.append(o)
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(cleaned, f, ensure_ascii=False, indent=2)
@@ -361,18 +361,18 @@ def write_json(rows: list[dict[str, str]], out_path: str | Path) -> Path:
 
 
 def schema_records_to_minimized(records: list[dict[str, str]]) -> list[dict[str, Any]]:
-    """Convert schema rows to minimized rows (regex extraction for text/numeric)."""
+    """Convert schema rows to minimized rows (regex extraction on ITEMDESC → text/numeric only)."""
     minimized: list[dict[str, Any]] = []
     for rec in records:
         desc = (rec.get("_item_description") or "").strip()
         extracted = regex_extract_attributes(desc)
         out_rec: dict[str, Any] = {
-            "item_type": rec.get("item_type", ""),
-            "main_group": rec.get("main_group", ""),
-            "sub_group": rec.get("sub_group", ""),
             "text": clean_str(extracted.get("text", "")) or None,
             "numeric": clean_str(extracted.get("numeric", "")) or None,
             "_item_description": rec.get("_item_description", ""),
+            "_item_type": rec.get("_item_type", ""),
+            "_main_group": rec.get("_main_group", ""),
+            "_sub_group": rec.get("_sub_group", ""),
         }
         minimized.append(out_rec)
     return minimized

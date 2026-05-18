@@ -8,12 +8,13 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from Config import EMBED_APPROVAL_CACHE_FILE as _DEFAULT_APPROVAL_EMBED_CACHE_PATH
+from logging_setup import get_logger
 from Config import EMBED_CACHE_FILE as _DEFAULT_EMBED_CACHE_PATH
 
 # ─────────────────────────────────────────────
@@ -26,6 +27,10 @@ EMBED_BATCH = 256  # encoding batch size (CPU)
 # Default cache lives next to the deployed app (Config.py path).
 EMBED_CACHE_FILE = str(_DEFAULT_EMBED_CACHE_PATH)
 EMBED_APPROVAL_CACHE_FILE = str(_DEFAULT_APPROVAL_EMBED_CACHE_PATH)
+
+logger = get_logger("style_textile.embeddings")
+
+CacheAction = Literal["reuse", "compute", "missing"]
 
 # Global singleton embedder (loaded once per process)
 _EMBEDDER: SentenceTransformer | None = None
@@ -53,15 +58,9 @@ def get_embedder(model_id: str = EMBED_MODEL) -> SentenceTransformer:
 def build_embedding_text(row: dict[str, Any]) -> str:
     """
     Flatten one minimized JSON row into a single string for embedding.
-    The input is expected to have: item_type, main_group, sub_group, text, numeric.
+    Only ITEMDESC-derived keys are used: ``text`` and ``numeric``.
     """
-    parts = [
-        row.get("item_type") or "",
-        row.get("main_group") or "",
-        row.get("sub_group") or "",
-        row.get("text") or "",
-        row.get("numeric") or "",
-    ]
+    parts = [row.get("text") or "", row.get("numeric") or ""]
     return " ".join(p.strip() for p in parts if p.strip())
 
 
@@ -127,6 +126,83 @@ def load_embedding_cache(cache_path: str | Path = EMBED_CACHE_FILE) -> tuple[np.
     return mat, meta if isinstance(meta, dict) else {}
 
 
+def _embedding_cache_can_reuse(
+    meta: dict[str, Any],
+    mat_cached: np.ndarray,
+    *,
+    total: int,
+    model: str,
+) -> bool:
+    """
+    Reuse on-disk embeddings when model and row count match.
+
+    ``text_digest`` is stored in metadata for diagnostics only — it does not invalidate the cache.
+    Full re-embed happens only via update-embeddings APIs (``force_recompute=True``) or when row count changes.
+    """
+    return (
+        isinstance(meta, dict)
+        and meta.get("model") == model
+        and int(meta.get("rows", -1)) == total
+        and mat_cached.ndim == 2
+        and int(mat_cached.shape[0]) == total
+    )
+
+
+def _embedding_cache_mismatch_reasons(
+    records: list[dict[str, Any]],
+    *,
+    cache_path: str | Path,
+    model: str = EMBED_MODEL,
+) -> list[str]:
+    """Human-readable reasons the on-disk cache cannot be reused for ``records``."""
+    reasons: list[str] = []
+    cache_npy = Path(cache_path)
+    cache_meta = cache_npy.with_suffix(cache_npy.suffix + ".meta.json")
+    if not cache_npy.exists() or not cache_meta.exists():
+        return ["cache file(s) missing"]
+    total = len(records)
+    try:
+        meta = json.loads(cache_meta.read_text(encoding="utf-8"))
+        mat_cached = np.load(cache_npy, mmap_mode="r")
+    except Exception as e:
+        return [f"cache unreadable: {e}"]
+    if not isinstance(meta, dict):
+        reasons.append("metadata is not a JSON object")
+    if meta.get("model") != model:
+        reasons.append(f"model mismatch (cache={meta.get('model')!r}, current={model!r})")
+    if int(meta.get("rows", -1)) != total:
+        reasons.append(f"row count mismatch (cache={meta.get('rows')}, current={total})")
+    if mat_cached.ndim != 2:
+        reasons.append("cache matrix is not 2D")
+    elif int(mat_cached.shape[0]) != total:
+        reasons.append(f".npy row count mismatch (file={mat_cached.shape[0]}, current={total})")
+    return reasons
+
+
+def describe_embedding_cache_action(
+    records: list[dict[str, Any]],
+    *,
+    cache_path: str | Path,
+    model: str = EMBED_MODEL,
+    force_recompute: bool = False,
+) -> CacheAction:
+    """Return whether ``build_faiss_index`` would reuse, compute, or find no cache files."""
+    if force_recompute:
+        return "compute"
+    cache_npy = Path(cache_path)
+    cache_meta = cache_npy.with_suffix(cache_npy.suffix + ".meta.json")
+    if not cache_npy.exists() or not cache_meta.exists():
+        return "missing"
+    total = len(records)
+    try:
+        meta = json.loads(cache_meta.read_text(encoding="utf-8"))
+        mat_cached = np.load(cache_npy, mmap_mode="r")
+        ok = _embedding_cache_can_reuse(meta, mat_cached, total=total, model=model)
+        return "reuse" if ok else "compute"
+    except Exception:
+        return "compute"
+
+
 def build_faiss_index(
     records: list[dict[str, Any]],
     *,
@@ -161,16 +237,9 @@ def build_faiss_index(
                 try:
                     meta = json.loads(cache_meta.read_text(encoding="utf-8"))
                     mat_cached = np.load(cache_npy)
-                    ok = (
-                        isinstance(meta, dict)
-                        and meta.get("model") == model
-                        and int(meta.get("rows", -1)) == total
-                        and str(meta.get("text_digest", "")) == digest
-                        and mat_cached.ndim == 2
-                        and int(mat_cached.shape[0]) == total
-                    )
+                    ok = _embedding_cache_can_reuse(meta, mat_cached, total=total, model=model)
                     if ok:
-                        print(f"  Reusing cached embeddings: {cache_npy}")
+                        logger.info("Embedding cache REUSE: %s (%s rows)", cache_npy, total)
                         mat_cached = mat_cached.astype(np.float32)
                         dim = mat_cached.shape[1]
                         index = faiss.IndexFlatIP(dim)
@@ -180,16 +249,26 @@ def build_faiss_index(
                         raise RuntimeError(
                             "Embedding cache present but does not match current rows/model/content. Refusing to recompute (reuse_only)."
                         )
-                    print("  Cache present but does not match rows/model/content. Recomputing embeddings...")
+                    why = _embedding_cache_mismatch_reasons(
+                        records, cache_path=cache_npy, model=model
+                    )
+                    logger.info(
+                        "Embedding cache STALE — will COMPUTE: %s (%s rows) | %s",
+                        cache_npy,
+                        total,
+                        "; ".join(why) if why else "unknown mismatch",
+                    )
                 except Exception as e:
                     # Preserve intentional reuse_only failures
                     if reuse_only and isinstance(e, RuntimeError):
                         raise
                     if reuse_only:
                         raise RuntimeError("Embedding cache unreadable. Refusing to recompute (reuse_only).") from e
-                    print("  Cache unreadable. Recomputing embeddings...")
+                    logger.warning("Embedding cache unreadable — will COMPUTE: %s", cache_npy)
             elif reuse_only:
                 raise RuntimeError("Embedding cache not found. Refusing to compute embeddings (reuse_only).")
+        else:
+            logger.info("Embedding cache MISSING — will COMPUTE: %s (%s rows)", cache_npy, total)
 
     # Local embedding in batches, written directly to cache (memory-mapped) to avoid high RAM usage.
     cache_npy_out: Path | None = cache_npy
@@ -213,14 +292,14 @@ def build_faiss_index(
             shape=(total, dim),
         )
         mm[:first_end] = first_vecs
-        print(f"  Embedded {first_end}/{total} rows...")
+        logger.info("Embedding COMPUTE progress: %s/%s rows", first_end, total)
 
         for start in range(first_end, total, batch_size):
             end = min(start + batch_size, total)
             batch_texts = [build_embedding_text(r) for r in records[start:end]]
             vecs = embed_texts_local(batch_texts, model_id=model, batch_size=min(len(batch_texts), batch_size))
             mm[start:end] = vecs
-            print(f"  Embedded {end}/{total} rows...")
+            logger.info("Embedding COMPUTE progress: %s/%s rows", end, total)
 
         mm.flush()
         mat = mm
@@ -244,9 +323,9 @@ def build_faiss_index(
                     ),
                     encoding="utf-8",
                 )
-            print(f"  Saved embedding cache: {cache_npy}")
+            logger.info("Embedding cache SAVED: %s (%s rows, dim=%s)", cache_npy, total, dim)
         except Exception as e:
-            print(f"  Warning: could not save cache: {e}")
+            logger.warning("Could not save embedding cache %s: %s", cache_npy, e)
 
     return index, mat
 

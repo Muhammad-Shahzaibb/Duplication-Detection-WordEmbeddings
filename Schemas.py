@@ -5,16 +5,28 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+ColumnMatchStatus = Literal["exact", "different"]
+
+
+class DuplicateGroupColumnStatus(BaseModel):
+    """Per-column variation within one duplicate cluster."""
+
+    ITEM_TYPE: ColumnMatchStatus = Field(..., description="exact if all ITEM_TYPE values in the group match.")
+    MAINGROUP: ColumnMatchStatus = Field(..., description="exact if all MAINGROUP values in the group match.")
+    SUBGROUP: ColumnMatchStatus = Field(..., description="exact if all SUBGROUP values in the group match.")
+    ITEMDESC: ColumnMatchStatus = Field(
+        default="different",
+        description="Always different (duplicates are detected on ITEMDESC embedding only).",
+    )
 
 
 class DuplicateGroupPayload(BaseModel):
-    """One duplicate cluster: fixed discriminator column + member rows."""
+    """One duplicate cluster: per-column status + member rows."""
 
-    status: Literal["ITEMDESC"] = Field(
-        default="ITEMDESC",
-        description="Column used to assess variation within the group (fixed: ITEMDESC).",
-    )
+    status: DuplicateGroupColumnStatus
     records: list[dict[str, Any]] = Field(
         default_factory=list,
         description="Rows in the group: row#, ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC",
@@ -49,24 +61,25 @@ class ItemMasterDuplicateEngineResponse(BaseModel):
     )
     duplicates: dict[str, DuplicateGroupPayload] = Field(
         default_factory=dict,
-        description="Keys DUP_1, DUP_2, …; each value has status=ITEMDESC and records[]",
+        description="Keys DUP_1, DUP_2, …; each value has per-column status (exact/different) and records[]",
     )
 
 
 class ItemMasterVariantDuplicateCheckRequest(BaseModel):
-    ITEM_TYPE: str = Field(..., description="Candidate ITEM_TYPE")
-    MAINGROUP: str = Field(..., description="Candidate MAINGROUP")
-    SUBGROUP: str = Field(..., description="Candidate SUBGROUP")
-    ITEMDESC: str = Field(..., description="Candidate ITEMDESC")
+    ITEMDESC: str = Field(..., description="Candidate ITEMDESC (duplicate check uses description only)")
+
+
+class VariantDuplicateMatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    ITEMDESC: str
+    location: Literal["db", "approval"] = Field(..., description="Main DB cache or approval queue cache.")
+    row: int = Field(..., serialization_alias="row#", description="1-based row index in that view (db or approval).")
 
 
 class ItemMasterVariantDuplicateCheckResponse(BaseModel):
     status: Literal["duplicate", "unique"] = Field(..., description="duplicate if any exact cosine==1 match exists.")
-    location: Literal["", "db", "approval", "both"] = Field(
-        default="",
-        description='Where duplicate(s) were found: "db" (main embedding cache), "approval", "both", or "" when unique.',
-    )
-    ITEMDESC: list[str] = Field(
+    matches: list[VariantDuplicateMatch] = Field(
         default_factory=list,
-        description="Original ITEMDESC values for all exact matches in main and/or approval (empty when unique).",
+        description="Each exact match: ITEMDESC, location (db|approval), row# in that source.",
     )
