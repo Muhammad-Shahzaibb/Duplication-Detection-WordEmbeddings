@@ -360,6 +360,28 @@ def write_json(rows: list[dict[str, str]], out_path: str | Path) -> Path:
     return out_path
 
 
+def write_minimized_embedding_input_json(
+    minimized: list[dict[str, Any]],
+    *,
+    jsonl_path: str | Path,
+    json_path: str | Path,
+) -> tuple[Path, Path]:
+    """
+    Persist the same ``text`` / ``numeric`` structure used for embeddings (one row per view row),
+    as JSONL + pretty JSON, before ``build_faiss_index`` runs.
+    """
+    jsonl_path = Path(jsonl_path)
+    json_path = Path(json_path)
+    payload: list[dict[str, Any]] = [{"text": r.get("text"), "numeric": r.get("numeric")} for r in minimized]
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+    with jsonl_path.open("w", encoding="utf-8") as f:
+        for row in payload:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return jsonl_path, json_path
+
+
 def schema_records_to_minimized(records: list[dict[str, str]]) -> list[dict[str, Any]]:
     """Convert schema rows to minimized rows (regex extraction on ITEMDESC → text/numeric only)."""
     minimized: list[dict[str, Any]] = []

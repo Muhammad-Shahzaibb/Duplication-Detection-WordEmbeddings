@@ -14,7 +14,11 @@ EMBED_CACHE_FILE: Path = APP_DIR / "embeddings_cache.npy"
 # Approval queue (items not yet in main Item Master) — same 4 columns as main view.
 EMBED_APPROVAL_CACHE_FILE: Path = APP_DIR / "Approval_embedding_cache.npy"
 
-# Postgres defaults (override via .env or environment)
+# Minimized JSON (text + numeric, same as embedding input) written before embedding.
+ITEM_MASTER_MINIMIZED_JSONL: Path = APP_DIR / "final_rows.jsonl"
+ITEM_MASTER_MINIMIZED_JSON: Path = APP_DIR / "final_rows.json"
+ITEM_MASTER_APPROVAL_MINIMIZED_JSONL: Path = APP_DIR / "Approval_final_rows.jsonl"
+ITEM_MASTER_APPROVAL_MINIMIZED_JSON: Path = APP_DIR / "Approval_final_rows.json"
 PG_HOST = os.environ.get("PGHOST", "163.61.91.149")
 PG_PORT = int(os.environ.get("PGPORT", "30010"))
 PG_DATABASE = os.environ.get("PGDATABASE", "Style")

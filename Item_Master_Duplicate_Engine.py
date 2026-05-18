@@ -4,6 +4,13 @@ from typing import Any, Literal
 
 import numpy as np
 
+from Config import (
+    EMBED_APPROVAL_CACHE_FILE,
+    ITEM_MASTER_APPROVAL_MINIMIZED_JSON,
+    ITEM_MASTER_APPROVAL_MINIMIZED_JSONL,
+    ITEM_MASTER_MINIMIZED_JSON,
+    ITEM_MASTER_MINIMIZED_JSONL,
+)
 from embeddings import (
     CacheAction,
     EMBED_BATCH,
@@ -13,10 +20,25 @@ from embeddings import (
     describe_embedding_cache_action,
     find_exact_duplicate_groups,
 )
-from jsonify import clean_str, row_to_schema_json, schema_records_to_minimized
+from jsonify import clean_str, row_to_schema_json, schema_records_to_minimized, write_minimized_embedding_input_json
 from logging_setup import get_logger
 
 logger = get_logger("style_textile.engine")
+
+
+def _minimized_json_paths_for_embedding_cache(cache: str | Path) -> tuple[Path, Path]:
+    """JSONL + JSON paths paired with main vs approval embedding cache."""
+    c = Path(cache).resolve()
+    if c == Path(EMBED_APPROVAL_CACHE_FILE).resolve():
+        return ITEM_MASTER_APPROVAL_MINIMIZED_JSONL, ITEM_MASTER_APPROVAL_MINIMIZED_JSON
+    return ITEM_MASTER_MINIMIZED_JSONL, ITEM_MASTER_MINIMIZED_JSON
+
+
+def _write_minimized_json_before_embed(minimized: list[dict[str, Any]], *, cache_path: str | Path) -> tuple[Path, Path]:
+    jl, jp = _minimized_json_paths_for_embedding_cache(cache_path)
+    paths = write_minimized_embedding_input_json(minimized, jsonl_path=jl, json_path=jp)
+    logger.info("Wrote minimized JSON (pre-embed): %s | %s", paths[0], paths[1])
+    return paths
 
 
 def _column_match_status(values: list[str]) -> str:
@@ -52,6 +74,7 @@ def load_or_build_embeddings_matrix_for_schema_records(
     batch = embed_batch if embed_batch is not None else EMBED_BATCH
     minimized = schema_records_to_minimized(records)
     before: CacheAction = describe_embedding_cache_action(minimized, cache_path=str(cache_path), model=model)
+    _write_minimized_json_before_embed(minimized, cache_path=cache_path)
     _index, mat = build_faiss_index(
         minimized,
         model=model,
@@ -84,6 +107,7 @@ def rebuild_item_master_embeddings_cache(
     print(f"         Model    : {model}")
     print(f"         Batch    : {batch}")
     print(f"         Cache    : {cache}")
+    _write_minimized_json_before_embed(minimized, cache_path=cache)
     _index, mat = build_faiss_index(
         minimized,
         model=model,
@@ -145,6 +169,7 @@ def run_item_master_duplicate_engine(
     if reuse_only:
         print("         Cache mode: reuse-only (no recompute)")
 
+    _write_minimized_json_before_embed(minimized, cache_path=cache)
     _index, mat = build_faiss_index(
         minimized,
         model=model,
