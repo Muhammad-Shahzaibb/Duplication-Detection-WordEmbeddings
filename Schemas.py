@@ -83,3 +83,48 @@ class ItemMasterVariantDuplicateCheckResponse(BaseModel):
         default_factory=list,
         description="Each exact match: ITEMDESC, location (db|approval), row# in that source.",
     )
+
+
+# ─── Bulk duplicate check ──────────────────────────────────────────────────────
+
+
+class ItemMasterBulkDuplicateCheckRequest(BaseModel):
+    ITEMDESC: list[str] = Field(
+        ...,
+        min_length=1,
+        description="List of candidate ITEMDESC values to check in bulk.",
+    )
+
+
+class IntraBulkDuplicateGroup(BaseModel):
+    """A set of submitted descriptions that are exact duplicates of each other."""
+
+    representative: str = Field(..., description="The description kept as the unique entry.")
+    duplicates: list[str] = Field(
+        ...,
+        description="All submitted values that are exact duplicates of the representative (representative excluded).",
+    )
+
+
+class BulkItemResult(BaseModel):
+    """Check result for one unique ITEMDESC from the bulk input."""
+
+    ITEMDESC: str
+    status: Literal["duplicate", "unique"]
+    matches: list[VariantDuplicateMatch] = Field(
+        default_factory=list,
+        description="Exact matches found in DB and/or approval (empty when unique).",
+    )
+
+
+class ItemMasterBulkDuplicateCheckResponse(BaseModel):
+    total_submitted: int = Field(..., description="Total ITEMDESC values received.")
+    unique_count: int = Field(..., description="Distinct descriptions after intra-bulk deduplication.")
+    intra_bulk_duplicate_groups: list[IntraBulkDuplicateGroup] = Field(
+        default_factory=list,
+        description="Groups of descriptions that were duplicates of each other within the submitted batch.",
+    )
+    results: list[BulkItemResult] = Field(
+        default_factory=list,
+        description="Per-unique-description match result against DB and approval caches.",
+    )

@@ -25,6 +25,10 @@ from embeddings import (
 from jsonify import schema_records_to_minimized
 from logging_setup import get_logger, setup_logging
 from Schemas import (
+    BulkItemResult,
+    IntraBulkDuplicateGroup,
+    ItemMasterBulkDuplicateCheckRequest,
+    ItemMasterBulkDuplicateCheckResponse,
     ItemMasterDuplicateEngineResponse,
     ItemMasterUpdateEmbeddingsResponse,
     ItemMasterVariantDuplicateCheckRequest,
@@ -247,6 +251,162 @@ def item_master_check_duplicate_variant(
         sum(1 for m in matches if m.location == "approval"),
     )
     return ItemMasterVariantDuplicateCheckResponse(status="duplicate", matches=matches)
+
+
+@app.post(
+    "/Item-Master-check-duplicate-bulk",
+    response_model=ItemMasterBulkDuplicateCheckResponse,
+    summary="Bulk duplicate check: intra-batch dedup then match against DB and approval caches",
+    tags=["ITEM MASTER APIS"],
+)
+def item_master_check_duplicate_bulk(
+    req: ItemMasterBulkDuplicateCheckRequest,
+) -> ItemMasterBulkDuplicateCheckResponse:
+    """
+    Two-step bulk duplicate check:
+
+    1. Embed all submitted ITEMDESC values in **real-time** (no cache reuse).
+       Detect exact-duplicate groups within the batch itself.
+    2. For each unique representative, check against the **main DB** embeddings (cache reuse only)
+       and the **approval** embeddings (build/reuse same as variant check).
+    """
+    submitted = req.ITEMDESC
+    total_submitted = len(submitted)
+    logger.info("POST /Item-Master-check-duplicate-bulk — start | submitted=%s", total_submitted)
+
+    # ── Step 1: embed the entire bulk in real-time (no cache) ──────────────────
+    bulk_schema = [row_to_schema_json(item_description=d) for d in submitted]
+    bulk_min = schema_records_to_minimized(bulk_schema)
+    bulk_texts = [build_embedding_text(r) for r in bulk_min]
+
+    logger.info("Bulk: computing %s real-time embeddings (no cache)", total_submitted)
+    bulk_mat = embed_texts_local(bulk_texts, model_id=EMBED_MODEL)
+    logger.info("Bulk: embeddings done | dim=%s", bulk_mat.shape[1] if bulk_mat.ndim == 2 else "?")
+
+    # ── Find intra-bulk duplicate groups ───────────────────────────────────────
+    from embeddings import find_exact_duplicate_groups
+    intra_groups_raw = find_exact_duplicate_groups(bulk_mat)
+
+    # Track which submitted indices are "extra" duplicates (not the representative)
+    # Representative = first index in each group; others are duplicates of it.
+    extra_indices: set[int] = set()
+    intra_bulk_groups: list[IntraBulkDuplicateGroup] = []
+    for group in intra_groups_raw:
+        rep_idx = group[0]
+        dup_idxs = group[1:]
+        extra_indices.update(dup_idxs)
+        intra_bulk_groups.append(
+            IntraBulkDuplicateGroup(
+                representative=submitted[rep_idx],
+                duplicates=[submitted[i] for i in dup_idxs],
+            )
+        )
+
+    logger.info(
+        "Bulk intra-batch: %s duplicate group(s), %s extra (removed) values",
+        len(intra_bulk_groups),
+        len(extra_indices),
+    )
+
+    # Unique indices: all submitted except the extra duplicates
+    unique_indices = [i for i in range(total_submitted) if i not in extra_indices]
+    unique_count = len(unique_indices)
+    logger.info("Bulk: %s unique descriptions proceeding to DB/approval check", unique_count)
+
+    # ── Step 2: load main DB cache once for all unique items ───────────────────
+    logger.info("DB embeddings [%s]: loading cache (reuse only)", EMBED_CACHE_FILE)
+    mat_main, meta_main = load_embedding_cache(EMBED_CACHE_FILE)
+    main_tuples = fetch_item_master_rows_from_view()
+    logger.info("DB embeddings: REUSED | rows=%s", len(main_tuples))
+
+    if str(meta_main.get("model", "")) != EMBED_MODEL:
+        raise RuntimeError(
+            "Main embedding cache model mismatch. Run /Item-Master-update-embeddings to refresh."
+        )
+    if int(meta_main.get("rows", -1)) != len(main_tuples):
+        raise RuntimeError(
+            "Main embedding cache row-count does not match current view rows. "
+            "Run /Item-Master-update-embeddings to refresh."
+        )
+    if int(meta_main.get("dim", -1)) != int(bulk_mat.shape[1]):
+        raise RuntimeError(
+            "Main embedding cache dimension does not match bulk embedding. "
+            "Run /Item-Master-update-embeddings to refresh."
+        )
+
+    # ── Load/build approval cache once ────────────────────────────────────────
+    mat_ap: np.ndarray | None = None
+    approval_tuples: list[tuple] = []
+    approval_tuples = fetch_item_master_rows_from_approval_view()
+    if not approval_tuples:
+        logger.info("Approval embeddings: skipped (0 rows in approval view)")
+    else:
+        approval_records = [
+            row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
+            for it, mg, sg, desc in approval_tuples
+        ]
+        approval_min = schema_records_to_minimized(approval_records)
+        planned = describe_embedding_cache_action(
+            approval_min, cache_path=EMBED_APPROVAL_CACHE_FILE, model=EMBED_MODEL
+        )
+        logger.info(
+            "Approval embeddings [%s]: planned action=%s | rows=%s",
+            EMBED_APPROVAL_CACHE_FILE, planned, len(approval_tuples),
+        )
+        mat_ap, ap_action = load_or_build_embeddings_matrix_for_schema_records(
+            approval_records, cache_path=EMBED_APPROVAL_CACHE_FILE
+        )
+        logger.info(
+            "Approval embeddings: %s | rows=%s",
+            "REUSED from cache" if ap_action == "reuse" else "COMPUTED and saved",
+            len(approval_tuples),
+        )
+        _, meta_ap = load_embedding_cache(EMBED_APPROVAL_CACHE_FILE)
+        if str(meta_ap.get("model", "")) != EMBED_MODEL:
+            raise RuntimeError(
+                "Approval embedding cache model mismatch. "
+                "Run /Item-Master-update-approval-embeddings to refresh."
+            )
+        if int(meta_ap.get("rows", -1)) != len(approval_tuples):
+            raise RuntimeError("Approval embedding cache row-count does not match approval view rows.")
+        if int(meta_ap.get("dim", -1)) != int(bulk_mat.shape[1]):
+            raise RuntimeError("Approval embedding cache dimension does not match bulk embedding.")
+
+    # ── Step 2: check each unique description ─────────────────────────────────
+    results: list[BulkItemResult] = []
+    for i in unique_indices:
+        cand_vec = bulk_mat[i]
+        desc = submitted[i]
+
+        matches: list[VariantDuplicateMatch] = _exact_variant_matches(
+            mat_main, main_tuples, cand_vec, location="db"
+        )
+        if mat_ap is not None:
+            matches.extend(
+                _exact_variant_matches(mat_ap, approval_tuples, cand_vec, location="approval")
+            )
+
+        results.append(
+            BulkItemResult(
+                ITEMDESC=desc,
+                status="duplicate" if matches else "unique",
+                matches=matches,
+            )
+        )
+
+    duplicate_results = sum(1 for r in results if r.status == "duplicate")
+    logger.info(
+        "POST /Item-Master-check-duplicate-bulk — done | submitted=%s unique=%s "
+        "intra_groups=%s db/approval_duplicates=%s",
+        total_submitted, unique_count, len(intra_bulk_groups), duplicate_results,
+    )
+
+    return ItemMasterBulkDuplicateCheckResponse(
+        total_submitted=total_submitted,
+        unique_count=unique_count,
+        intra_bulk_duplicate_groups=intra_bulk_groups,
+        results=results,
+    )
 
 
 if __name__ == "__main__":
