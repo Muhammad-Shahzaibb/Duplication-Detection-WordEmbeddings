@@ -32,6 +32,11 @@ ITEM_MASTER_VIEW = os.environ.get("ITEM_MASTER_VIEW", "vw_item_master_view2")
 # Approval Item Master view (override via ITEM_MASTER_APPROVAL_VIEW)
 ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", "vw_item_master_items")
 
+# ORDER BY clause (comma-separated, **without** leading "ORDER BY") for stable row order vs embedding cache.
+# If empty, Db_View builds: ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC NULLS LAST.
+# Override if your view has a stable id, e.g.: ITEM_MASTER_ORDER_BY='"ITEM_ID" NULLS LAST'
+ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", "").strip()
+
 
 def load_dotenv() -> None:
     """Load KEY=VALUE pairs from .env in APP_DIR or cwd (does not override existing env)."""
@@ -53,7 +58,7 @@ def load_dotenv() -> None:
             continue
 
     # Refresh derived settings after .env load
-    global PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD, PG_SCHEMA, ITEM_MASTER_VIEW, ITEM_MASTER_APPROVAL_VIEW
+    global PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD, PG_SCHEMA, ITEM_MASTER_VIEW, ITEM_MASTER_APPROVAL_VIEW, ITEM_MASTER_ORDER_BY
     PG_HOST = os.environ.get("PGHOST", PG_HOST)
     PG_PORT = int(os.environ.get("PGPORT", str(PG_PORT)))
     PG_DATABASE = os.environ.get("PGDATABASE", PG_DATABASE)
@@ -62,6 +67,7 @@ def load_dotenv() -> None:
     PG_SCHEMA = os.environ.get("PGSCHEMA", PG_SCHEMA)
     ITEM_MASTER_VIEW = os.environ.get("ITEM_MASTER_VIEW", ITEM_MASTER_VIEW)
     ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", ITEM_MASTER_APPROVAL_VIEW)
+    ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", ITEM_MASTER_ORDER_BY).strip()
 
 
 load_dotenv()

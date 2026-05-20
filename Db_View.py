@@ -7,6 +7,7 @@ from typing import Any
 
 from Config import (
     ITEM_MASTER_APPROVAL_VIEW,
+    ITEM_MASTER_ORDER_BY,
     ITEM_MASTER_VIEW,
     PG_DATABASE,
     PG_HOST,
@@ -15,6 +16,32 @@ from Config import (
     PG_SCHEMA,
     PG_USER,
 )
+
+
+def _sql_quote_ident(name: str) -> str:
+    """Double-quote a PostgreSQL identifier (handles mixed case)."""
+    n = name.strip()
+    if n.startswith('"') and n.endswith('"'):
+        return n
+    return '"' + n.replace('"', '""') + '"'
+
+
+def _view_order_by_clause(
+    *,
+    col_item_type: str,
+    col_main_group: str,
+    col_sub_group: str,
+    col_item_description: str,
+) -> str:
+    """Stable ORDER BY for cache row alignment (override via Config.ITEM_MASTER_ORDER_BY)."""
+    if ITEM_MASTER_ORDER_BY:
+        return ITEM_MASTER_ORDER_BY
+    return (
+        f"{_sql_quote_ident(col_item_type)} NULLS LAST, "
+        f"{_sql_quote_ident(col_main_group)} NULLS LAST, "
+        f"{_sql_quote_ident(col_sub_group)} NULLS LAST, "
+        f"{_sql_quote_ident(col_item_description)} NULLS LAST"
+    )
 
 
 def fetch_item_master_rows_from_view(
@@ -33,7 +60,8 @@ def fetch_item_master_rows_from_view(
     col_item_description: str = "ITEMDESC",
 ) -> list[tuple[Any, Any, Any, Any]]:
     """
-    Return rows as (ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC) tuples in view order.
+    Return rows as (ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC) tuples in **deterministic** order
+    (ORDER BY on the four columns, or ``ITEM_MASTER_ORDER_BY`` from env / Config).
     """
     h = host or PG_HOST
     p = int(port or PG_PORT)
@@ -72,10 +100,16 @@ def fetch_item_master_rows_from_view(
             ) from e
 
     ident = f'"{sch}"."{v}"'
+    order_by = _view_order_by_clause(
+        col_item_type=col_item_type,
+        col_main_group=col_main_group,
+        col_sub_group=col_sub_group,
+        col_item_description=col_item_description,
+    )
     limit_sql = " LIMIT %s" if rows_limit is not None else ""
     sql = (
         f'SELECT "{col_item_type}", "{col_main_group}", "{col_sub_group}", "{col_item_description}" '
-        f"FROM {ident}{limit_sql}"
+        f"FROM {ident} ORDER BY {order_by}{limit_sql}"
     )
 
     out: list[tuple[Any, Any, Any, Any]] = []
