@@ -5,6 +5,7 @@ from typing import Any, Literal
 import numpy as np
 
 from Config import (
+    DUPLICATE_ENGINE_TEXT_THRESHOLD,
     EMBED_APPROVAL_CACHE_FILE,
     ITEM_MASTER_APPROVAL_MINIMIZED_JSON,
     ITEM_MASTER_APPROVAL_MINIMIZED_JSONL,
@@ -18,7 +19,7 @@ from embeddings import (
     EMBED_MODEL,
     build_faiss_index,
     describe_embedding_cache_action,
-    find_exact_duplicate_groups,
+    find_duplicate_groups_by_text_and_numeric,
 )
 from jsonify import clean_str, row_to_schema_json, schema_records_to_minimized, write_minimized_embedding_input_json
 from logging_setup import get_logger
@@ -180,8 +181,13 @@ def run_item_master_duplicate_engine(
     print(f"[Step 2] FAISS index built — {mat.shape[0]} vectors of dim {mat.shape[1]}")
     print("[Step 2] Searching for duplicate groups...")
 
-    groups = find_exact_duplicate_groups(mat)
-    print(f"[Step 2] Found {len(groups)} duplicate group(s)")
+    numerics = [r.get("numeric") or "" for r in minimized]
+    groups = find_duplicate_groups_by_text_and_numeric(
+        np.asarray(mat, dtype=np.float32),
+        numerics,
+        text_threshold=DUPLICATE_ENGINE_TEXT_THRESHOLD,
+    )
+    print(f"[Step 2] Found {len(groups)} duplicate group(s) (text_threshold={DUPLICATE_ENGINE_TEXT_THRESHOLD})")
 
     duplicate_record_count = sum(max(0, len(g) - 1) for g in groups)
     valid_records = total - duplicate_record_count

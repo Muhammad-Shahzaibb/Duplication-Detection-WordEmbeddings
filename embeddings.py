@@ -57,11 +57,13 @@ def get_embedder(model_id: str = EMBED_MODEL) -> SentenceTransformer:
 
 def build_embedding_text(row: dict[str, Any]) -> str:
     """
-    Flatten one minimized JSON row into a single string for embedding.
-    Only ITEMDESC-derived keys are used: ``text`` and ``numeric``.
+    Build the string that gets embedded for a minimized JSON row.
+
+    Only the *text* (non-numeric) part of ITEMDESC is embedded.
+    The *numeric* part is stored separately in the minimized record and
+    must match exactly at query time — it is never part of the vector.
     """
-    parts = [row.get("text") or "", row.get("numeric") or ""]
-    return " ".join(p.strip() for p in parts if p.strip())
+    return (row.get("text") or "").strip()
 
 
 def _texts_digest_records(records: list[dict[str, Any]]) -> str:
@@ -350,4 +352,118 @@ def find_exact_duplicate_groups(
     groups = [sorted(g) for g in groups]
     groups.sort(key=lambda g: g[0])
     return groups
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Text-threshold + exact-numeric matching helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _uf_root(parent: list[int], x: int) -> int:
+    """Union-Find root with path compression."""
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+
+def find_duplicate_groups_by_text_and_numeric(
+    mat: np.ndarray,
+    numerics: list[str | None],
+    *,
+    text_threshold: float = 0.90,
+) -> list[list[int]]:
+    """
+    Group rows as duplicates when **both** conditions hold:
+
+    1. Their *numeric* parts match exactly (case-insensitive, stripped).
+    2. Their *text* embedding cosine similarity is >= ``text_threshold``.
+
+    Algorithm: bucket by numeric first (cheap O(N)), then pairwise cosine
+    inside each bucket (fast — buckets are small in practice), with
+    union-find for transitive closure (A≈B and B≈C → A,B,C one group).
+
+    Used by ``/Item-Master-duplicate-engine`` and intra-bulk step of
+    ``/Item-Master-check-duplicate-bulk``.
+    """
+    if mat.size == 0 or not numerics:
+        return []
+
+    from collections import defaultdict
+
+    # 1. Group row indices by normalised numeric value
+    numeric_groups: dict[str, list[int]] = defaultdict(list)
+    for i, num in enumerate(numerics):
+        key = (num or "").strip().casefold()
+        numeric_groups[key].append(i)
+
+    all_clusters: list[list[int]] = []
+
+    for indices in numeric_groups.values():
+        if len(indices) < 2:
+            continue
+
+        sub = mat[indices]          # (k, D) — already L2-normalised
+        sims = sub @ sub.T          # pairwise cosine (k, k)
+        k = len(indices)
+        parent = list(range(k))
+
+        for a in range(k):
+            for b in range(a + 1, k):
+                if float(sims[a, b]) >= text_threshold:
+                    pa = _uf_root(parent, a)
+                    pb = _uf_root(parent, b)
+                    if pa != pb:
+                        parent[pa] = pb
+
+        comp: dict[int, list[int]] = defaultdict(list)
+        for a in range(k):
+            comp[_uf_root(parent, a)].append(indices[a])
+
+        for members in comp.values():
+            if len(members) >= 2:
+                all_clusters.append(sorted(members))
+
+    all_clusters.sort(key=lambda g: g[0])
+    return all_clusters
+
+
+def find_variant_matches_with_threshold(
+    mat: np.ndarray,
+    numerics: list[str | None],
+    cand_text_vec: np.ndarray,
+    cand_numeric: str | None,
+    *,
+    text_threshold: float = 0.90,
+) -> list[int]:
+    """
+    Return the indices of rows that match the candidate under the
+    text-threshold + exact-numeric rules:
+
+    1. Row numeric == candidate numeric (case-insensitive, stripped).
+    2. Row text cosine similarity >= ``text_threshold``.
+
+    Used by ``/Item-Master-check-duplicate-variant`` and the DB/approval
+    step of ``/Item-Master-check-duplicate-bulk``.
+    """
+    if mat.size == 0:
+        return []
+
+    cand_num = (cand_numeric or "").strip().casefold()
+
+    # Filter to rows whose numeric matches the candidate
+    numeric_match_indices = [
+        i for i, num in enumerate(numerics)
+        if (num or "").strip().casefold() == cand_num
+    ]
+    if not numeric_match_indices:
+        return []
+
+    sub_mat = mat[numeric_match_indices]        # (m, D)
+    scores = sub_mat @ cand_text_vec            # (m,) cosine similarities
+
+    return [
+        numeric_match_indices[j]
+        for j, score in enumerate(scores)
+        if float(score) >= text_threshold
+    ]
 

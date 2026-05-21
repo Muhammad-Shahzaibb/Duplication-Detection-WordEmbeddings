@@ -37,6 +37,17 @@ ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", "vw_item
 # Override if your view has a stable id, e.g.: ITEM_MASTER_ORDER_BY='"ITEM_ID" NULLS LAST'
 ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", "").strip()
 
+# ── Cosine similarity thresholds ─────────────────────────────────────────────
+# Embeddings are built on the TEXT part of ITEMDESC only.
+# NUMERIC part must match exactly (case-insensitive, stripped).
+#
+# DUPLICATE_ENGINE_TEXT_THRESHOLD  — used by /Item-Master-duplicate-engine
+#                                    and by the intra-bulk step in /Item-Master-check-duplicate-bulk.
+# VARIANT_CHECK_TEXT_THRESHOLD     — used by /Item-Master-check-duplicate-variant
+#                                    and by the DB/approval step in /Item-Master-check-duplicate-bulk.
+DUPLICATE_ENGINE_TEXT_THRESHOLD = float(os.environ.get("DUPLICATE_ENGINE_TEXT_THRESHOLD", "0.985"))
+VARIANT_CHECK_TEXT_THRESHOLD = float(os.environ.get("VARIANT_CHECK_TEXT_THRESHOLD", "0.97"))
+
 
 def load_dotenv() -> None:
     """Load KEY=VALUE pairs from .env in APP_DIR or cwd (does not override existing env)."""
@@ -58,7 +69,9 @@ def load_dotenv() -> None:
             continue
 
     # Refresh derived settings after .env load
-    global PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD, PG_SCHEMA, ITEM_MASTER_VIEW, ITEM_MASTER_APPROVAL_VIEW, ITEM_MASTER_ORDER_BY
+    global PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD, PG_SCHEMA
+    global ITEM_MASTER_VIEW, ITEM_MASTER_APPROVAL_VIEW, ITEM_MASTER_ORDER_BY
+    global DUPLICATE_ENGINE_TEXT_THRESHOLD, VARIANT_CHECK_TEXT_THRESHOLD
     PG_HOST = os.environ.get("PGHOST", PG_HOST)
     PG_PORT = int(os.environ.get("PGPORT", str(PG_PORT)))
     PG_DATABASE = os.environ.get("PGDATABASE", PG_DATABASE)
@@ -68,6 +81,12 @@ def load_dotenv() -> None:
     ITEM_MASTER_VIEW = os.environ.get("ITEM_MASTER_VIEW", ITEM_MASTER_VIEW)
     ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", ITEM_MASTER_APPROVAL_VIEW)
     ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", ITEM_MASTER_ORDER_BY).strip()
+    DUPLICATE_ENGINE_TEXT_THRESHOLD = float(
+        os.environ.get("DUPLICATE_ENGINE_TEXT_THRESHOLD", str(DUPLICATE_ENGINE_TEXT_THRESHOLD))
+    )
+    VARIANT_CHECK_TEXT_THRESHOLD = float(
+        os.environ.get("VARIANT_CHECK_TEXT_THRESHOLD", str(VARIANT_CHECK_TEXT_THRESHOLD))
+    )
 
 
 load_dotenv()

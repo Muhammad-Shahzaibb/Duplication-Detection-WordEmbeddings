@@ -6,6 +6,7 @@ from __future__ import annotations
 import numpy as np
 from fastapi import FastAPI
 
+from Config import DUPLICATE_ENGINE_TEXT_THRESHOLD, VARIANT_CHECK_TEXT_THRESHOLD
 from Db_View import fetch_item_master_rows_from_approval_view, fetch_item_master_rows_from_view
 from Item_Master_Duplicate_Engine import (
     load_or_build_embeddings_matrix_for_schema_records,
@@ -20,9 +21,11 @@ from embeddings import (
     build_embedding_text,
     describe_embedding_cache_action,
     embed_texts_local,
+    find_duplicate_groups_by_text_and_numeric,
+    find_variant_matches_with_threshold,
     load_embedding_cache,
 )
-from jsonify import schema_records_to_minimized
+from jsonify import regex_extract_attributes, schema_records_to_minimized
 from logging_setup import get_logger, setup_logging
 from Schemas import (
     BulkItemResult,
@@ -45,18 +48,33 @@ app = FastAPI(
     openapi_tags=[{"name": "ITEM MASTER APIS", "description": "Item Master data and duplicate detection."}],
 )
 
-EXACT_COSINE_EPS = 1e-7
+def _extract_tuple_numerics(tuples: list[tuple]) -> list[str]:
+    """Extract the *numeric* part of ITEMDESC from each view tuple (it, mg, sg, desc)."""
+    return [
+        (regex_extract_attributes(str(t[3]) if t[3] is not None else "").get("numeric") or "")
+        for t in tuples
+    ]
 
 
-def _exact_variant_matches(
+def _threshold_variant_matches(
     mat: np.ndarray,
     tuples: list[tuple],
-    vec: np.ndarray,
+    row_numerics: list[str],
+    cand_vec: np.ndarray,
+    cand_numeric: str,
     *,
     location: str,
+    text_threshold: float,
 ) -> list[VariantDuplicateMatch]:
-    scores = np.asarray(mat @ vec, dtype=np.float32)
-    idxs = np.where(scores >= (1.0 - EXACT_COSINE_EPS))[0].tolist()
+    """
+    Return matches where:
+      - numeric parts match exactly (case-insensitive, stripped), AND
+      - text cosine similarity >= text_threshold.
+    """
+    idxs = find_variant_matches_with_threshold(
+        mat, row_numerics, cand_vec, cand_numeric,
+        text_threshold=text_threshold,
+    )
     out: list[VariantDuplicateMatch] = []
     for i in idxs:
         desc = "" if tuples[i][3] is None else str(tuples[i][3])
@@ -156,7 +174,8 @@ def item_master_check_duplicate_variant(
     candidate_schema = row_to_schema_json(item_description=req.ITEMDESC)
     candidate_min = schema_records_to_minimized([candidate_schema])[0]
     candidate_text = build_embedding_text(candidate_min)
-    logger.info("Candidate embedding text: %r", candidate_text)
+    cand_numeric = candidate_min.get("numeric") or ""
+    logger.info("Candidate embedding text: %r | numeric: %r", candidate_text, cand_numeric)
 
     cand_vec = embed_texts_local([candidate_text], model_id=EMBED_MODEL, batch_size=1)
     if cand_vec.ndim != 2 or cand_vec.shape[0] != 1:
@@ -188,9 +207,17 @@ def item_master_check_duplicate_variant(
             "Run /Item-Master-update-embeddings to refresh the cache."
         )
 
-    db_matches = _exact_variant_matches(mat_main, main_tuples, cand_vec, location="db")
+    main_numerics = _extract_tuple_numerics(main_tuples)
+    db_matches = _threshold_variant_matches(
+        mat_main, main_tuples, main_numerics, cand_vec, cand_numeric,
+        location="db",
+        text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
+    )
     matches.extend(db_matches)
-    logger.info("DB embeddings: exact matches=%s", len(db_matches))
+    logger.info(
+        "DB embeddings: matches=%s (text_threshold=%.2f, cand_numeric=%r)",
+        len(db_matches), VARIANT_CHECK_TEXT_THRESHOLD, cand_numeric,
+    )
 
     # --- Approval embeddings (reuse or compute) ---
     approval_tuples = fetch_item_master_rows_from_approval_view()
@@ -236,9 +263,17 @@ def item_master_check_duplicate_variant(
         if int(meta_ap.get("dim", -1)) != int(cand_vec.shape[0]):
             raise RuntimeError("Approval embedding cache dimension does not match candidate embedding.")
 
-        ap_matches = _exact_variant_matches(mat_ap, approval_tuples, cand_vec, location="approval")
+        approval_numerics = _extract_tuple_numerics(approval_tuples)
+        ap_matches = _threshold_variant_matches(
+            mat_ap, approval_tuples, approval_numerics, cand_vec, cand_numeric,
+            location="approval",
+            text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
+        )
         matches.extend(ap_matches)
-        logger.info("Approval embeddings: exact matches=%s", len(ap_matches))
+        logger.info(
+            "Approval embeddings: matches=%s (text_threshold=%.2f, cand_numeric=%r)",
+            len(ap_matches), VARIANT_CHECK_TEXT_THRESHOLD, cand_numeric,
+        )
 
     if not matches:
         logger.info("POST /Item-Master-check-duplicate-variant — done | status=unique")
@@ -283,9 +318,15 @@ def item_master_check_duplicate_bulk(
     bulk_mat = embed_texts_local(bulk_texts, model_id=EMBED_MODEL)
     logger.info("Bulk: embeddings done | dim=%s", bulk_mat.shape[1] if bulk_mat.ndim == 2 else "?")
 
-    # ── Find intra-bulk duplicate groups ───────────────────────────────────────
-    from embeddings import find_exact_duplicate_groups
-    intra_groups_raw = find_exact_duplicate_groups(bulk_mat)
+    # ── Find intra-bulk duplicate groups (engine threshold + exact numeric) ────
+    bulk_numerics = [r.get("numeric") or "" for r in bulk_min]
+    logger.info(
+        "Bulk intra-batch: using text_threshold=%.2f + exact numeric match",
+        DUPLICATE_ENGINE_TEXT_THRESHOLD,
+    )
+    intra_groups_raw = find_duplicate_groups_by_text_and_numeric(
+        bulk_mat, bulk_numerics, text_threshold=DUPLICATE_ENGINE_TEXT_THRESHOLD
+    )
 
     # Track which submitted indices are "extra" duplicates (not the representative)
     # Representative = first index in each group; others are duplicates of it.
@@ -372,18 +413,33 @@ def item_master_check_duplicate_bulk(
         if int(meta_ap.get("dim", -1)) != int(bulk_mat.shape[1]):
             raise RuntimeError("Approval embedding cache dimension does not match bulk embedding.")
 
+    # ── Pre-compute per-row numerics for DB and approval (done once, not per item) ──
+    main_row_numerics = _extract_tuple_numerics(main_tuples)
+    approval_row_numerics = _extract_tuple_numerics(approval_tuples) if approval_tuples else []
+    logger.info(
+        "Bulk DB/approval checks: text_threshold=%.2f + exact numeric match",
+        VARIANT_CHECK_TEXT_THRESHOLD,
+    )
+
     # ── Step 2: check each unique description ─────────────────────────────────
     results: list[BulkItemResult] = []
     for i in unique_indices:
         cand_vec = bulk_mat[i]
         desc = submitted[i]
+        cand_numeric = bulk_min[i].get("numeric") or ""
 
-        matches: list[VariantDuplicateMatch] = _exact_variant_matches(
-            mat_main, main_tuples, cand_vec, location="db"
+        matches: list[VariantDuplicateMatch] = _threshold_variant_matches(
+            mat_main, main_tuples, main_row_numerics, cand_vec, cand_numeric,
+            location="db",
+            text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
         )
         if mat_ap is not None:
             matches.extend(
-                _exact_variant_matches(mat_ap, approval_tuples, cand_vec, location="approval")
+                _threshold_variant_matches(
+                    mat_ap, approval_tuples, approval_row_numerics, cand_vec, cand_numeric,
+                    location="approval",
+                    text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
+                )
             )
 
         results.append(
