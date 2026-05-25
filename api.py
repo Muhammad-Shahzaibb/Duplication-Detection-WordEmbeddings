@@ -96,11 +96,13 @@ def _threshold_variant_matches(
 )
 def item_master_duplicate_engine() -> ItemMasterDuplicateEngineResponse:
     logger.info("POST /Item-Master-duplicate-engine — start")
-    tuples = fetch_item_master_rows_from_view()
+    tuples = fetch_item_master_rows_from_view(include_item_code=True)
     logger.info("Main view rows fetched: %s", len(tuples))
     records = [
-        row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
-        for it, mg, sg, desc in tuples
+        row_to_schema_json(
+            item_description=desc, item_type=it, main_group=mg, sub_group=sg, item_code=code
+        )
+        for it, mg, sg, desc, code in tuples
     ]
     payload = run_item_master_duplicate_engine(records)
     logger.info(

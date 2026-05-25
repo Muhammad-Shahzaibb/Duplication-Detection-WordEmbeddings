@@ -200,15 +200,16 @@ def run_item_master_duplicate_engine(
         rows_out: list[dict[str, Any]] = []
         for m in members:
             rec = minimized[m]
-            rows_out.append(
-                {
-                    "row#": m + 1,
-                    "ITEM_TYPE": clean_str(rec.get("_item_type", "")),
-                    "MAINGROUP": clean_str(rec.get("_main_group", "")),
-                    "SUBGROUP": clean_str(rec.get("_sub_group", "")),
-                    "ITEMDESC": clean_str(rec.get("_item_description", "")),
-                }
-            )
+            row_payload: dict[str, Any] = {
+                "row#": m + 1,
+                "ITEM_TYPE": clean_str(rec.get("_item_type", "")),
+                "MAINGROUP": clean_str(rec.get("_main_group", "")),
+                "SUBGROUP": clean_str(rec.get("_sub_group", "")),
+                "ITEMDESC": clean_str(rec.get("_item_description", "")),
+            }
+            if "_item_code" in rec:
+                row_payload["ITEM_CODE"] = clean_str(rec.get("_item_code", ""))
+            rows_out.append(row_payload)
         duplicates[dup_id] = {
             "status": _duplicate_group_column_status(rows_out),
             "records": rows_out,

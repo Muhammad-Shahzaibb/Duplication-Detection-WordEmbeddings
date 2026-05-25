@@ -271,6 +271,7 @@ def row_to_schema_json(
     item_type: Any = "",
     main_group: Any = "",
     sub_group: Any = "",
+    item_code: Any | None = None,
 ) -> dict[str, str]:
     """
     Convert one row into a base record for the pipeline.
@@ -278,12 +279,15 @@ def row_to_schema_json(
     Only ITEMDESC is used for JSON minimization and embeddings (``text`` / ``numeric``).
     Hierarchy columns are kept as ``_item_*`` for duplicate-engine output only.
     """
-    return {
+    out: dict[str, str] = {
         "_item_description": clean_str(item_description),
         "_item_type": clean_str(item_type),
         "_main_group": clean_str(main_group),
         "_sub_group": clean_str(sub_group),
     }
+    if item_code is not None:
+        out["_item_code"] = clean_str(item_code)
+    return out
 
 
 def dataframe_to_schema_jsons(
@@ -396,6 +400,8 @@ def schema_records_to_minimized(records: list[dict[str, str]]) -> list[dict[str,
             "_main_group": rec.get("_main_group", ""),
             "_sub_group": rec.get("_sub_group", ""),
         }
+        if "_item_code" in rec:
+            out_rec["_item_code"] = rec.get("_item_code", "")
         minimized.append(out_rec)
     return minimized
 

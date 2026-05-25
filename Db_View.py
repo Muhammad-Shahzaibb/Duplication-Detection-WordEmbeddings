@@ -58,10 +58,15 @@ def fetch_item_master_rows_from_view(
     col_main_group: str = "MAINGROUP",
     col_sub_group: str = "SUBGROUP",
     col_item_description: str = "ITEMDESC",
-) -> list[tuple[Any, Any, Any, Any]]:
+    col_item_code: str = "ITEM_CODE",
+    include_item_code: bool = False,
+) -> list[tuple[Any, ...]]:
     """
     Return rows as (ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC) tuples in **deterministic** order
     (ORDER BY on the four columns, or ``ITEM_MASTER_ORDER_BY`` from env / Config).
+
+    When ``include_item_code=True`` (main view / duplicate-engine only), each tuple also includes
+    ITEM_CODE as the fifth element.
     """
     h = host or PG_HOST
     p = int(port or PG_PORT)
@@ -107,12 +112,20 @@ def fetch_item_master_rows_from_view(
         col_item_description=col_item_description,
     )
     limit_sql = " LIMIT %s" if rows_limit is not None else ""
-    sql = (
-        f'SELECT "{col_item_type}", "{col_main_group}", "{col_sub_group}", "{col_item_description}" '
-        f"FROM {ident} ORDER BY {order_by}{limit_sql}"
-    )
+    if include_item_code:
+        select_cols = (
+            f'"{col_item_type}", "{col_main_group}", "{col_sub_group}", '
+            f'"{col_item_description}", "{col_item_code}"'
+        )
+        expected_cols = 5
+    else:
+        select_cols = (
+            f'"{col_item_type}", "{col_main_group}", "{col_sub_group}", "{col_item_description}"'
+        )
+        expected_cols = 4
+    sql = f"SELECT {select_cols} FROM {ident} ORDER BY {order_by}{limit_sql}"
 
-    out: list[tuple[Any, Any, Any, Any]] = []
+    out: list[tuple[Any, ...]] = []
     try:
         cur = conn.cursor()
         try:
@@ -126,9 +139,9 @@ def fetch_item_master_rows_from_view(
                 if not batch:
                     break
                 for row in batch:
-                    if len(row) != 4:
-                        raise ValueError(f"Expected 4 columns, got {len(row)}")
-                    out.append((row[0], row[1], row[2], row[3]))
+                    if len(row) != expected_cols:
+                        raise ValueError(f"Expected {expected_cols} columns, got {len(row)}")
+                    out.append(tuple(row))
         finally:
             try:
                 cur.close()
