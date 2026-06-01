@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from Config import DUPLICATE_ENGINE_TEXT_THRESHOLD, VARIANT_CHECK_TEXT_THRESHOLD
 from Db_View import fetch_item_master_rows_from_approval_view, fetch_item_master_rows_from_view
@@ -47,6 +48,15 @@ app = FastAPI(
     version="1.0.0",
     openapi_tags=[{"name": "ITEM MASTER APIS", "description": "Item Master data and duplicate detection."}],
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def _extract_tuple_numerics(tuples: list[tuple]) -> list[str]:
     """Extract the *numeric* part of ITEMDESC from each view tuple (it, mg, sg, desc)."""
