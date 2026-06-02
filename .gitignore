@@ -4,13 +4,5 @@ env/
 Data.xlsx
 __pycache__/
 
-# local embedding cache (too large for GitHub)
-embeddings_cache.npy
-embeddings_cache.npy.meta.json
-Approval_embedding_cache.npy
-Approval_embedding_cache.npy.meta.json
-
-final_rows.json
-final_rows.jsonl
-Approval_final_rows.json
-Approval_final_rows.jsonl
+# local embedding cache + metadata (too large for GitHub)
+cache/
