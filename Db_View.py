@@ -9,6 +9,7 @@ from Config import (
     ITEM_MASTER_APPROVAL_VIEW,
     ITEM_MASTER_ORDER_BY,
     ITEM_MASTER_VIEW,
+    PG_CONNECT_TIMEOUT,
     PG_DATABASE,
     PG_HOST,
     PG_PASSWORD,
@@ -27,6 +28,63 @@ def _sql_quote_ident(name: str) -> str:
     if n.startswith('"') and n.endswith('"'):
         return n
     return '"' + n.replace('"', '""') + '"'
+
+
+def _pg_connect_error(host: str, port: int, dbname: str, exc: BaseException) -> RuntimeError:
+    """Build a clear connection error (do not mask timeouts as missing psycopg2)."""
+    detail = str(exc).strip() or type(exc).__name__
+    lowered = detail.lower()
+    if "timeout" in lowered or type(exc).__name__ == "ConnectionTimeout":
+        return RuntimeError(
+            f"Postgres connection timed out after {PG_CONNECT_TIMEOUT}s to "
+            f"{host}:{port}/{dbname}. Check VPN/firewall, PGHOST/PGPORT in .env, "
+            "and that the database server is reachable from this machine."
+        )
+    return RuntimeError(
+        f"Could not connect to Postgres at {host}:{port}/{dbname}: {detail}"
+    )
+
+
+def _pg_connect(
+    host: str, port: int, dbname: str, user: str, password: str
+) -> Any:
+    """
+    Connect with psycopg3 if installed; otherwise psycopg2.
+
+    Connection failures from psycopg3 are re-raised with a clear message (not masked
+    by a fallback driver that may not be installed).
+    """
+    kwargs = {
+        "host": host,
+        "port": port,
+        "dbname": dbname,
+        "user": user,
+        "password": password,
+        "connect_timeout": PG_CONNECT_TIMEOUT,
+    }
+
+    try:
+        import psycopg  # type: ignore
+    except ImportError:
+        psycopg = None  # type: ignore
+
+    if psycopg is not None:
+        try:
+            return psycopg.connect(**kwargs)
+        except Exception as e:
+            raise _pg_connect_error(host, port, dbname, e) from e
+
+    try:
+        import psycopg2  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "Postgres driver not installed. Run: pip install psycopg[binary]"
+        ) from e
+
+    try:
+        return psycopg2.connect(**kwargs)
+    except Exception as e:
+        raise _pg_connect_error(host, port, dbname, e) from e
 
 
 def _view_order_by_clause(
@@ -106,33 +164,7 @@ def fetch_item_master_rows_from_view(
     sch = schema or PG_SCHEMA
     v = view or ITEM_MASTER_VIEW
 
-    try:
-        import psycopg  # type: ignore
-
-        conn = psycopg.connect(
-            host=h,
-            port=p,
-            dbname=db,
-            user=u,
-            password=pw,
-            connect_timeout=15,
-        )
-    except Exception:
-        try:
-            import psycopg2  # type: ignore
-
-            conn = psycopg2.connect(
-                host=h,
-                port=p,
-                dbname=db,
-                user=u,
-                password=pw,
-                connect_timeout=15,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Could not connect to Postgres. Install: pip install psycopg[binary] or psycopg2-binary"
-            ) from e
+    conn = _pg_connect(h, p, db, u, pw)
 
     ident = f'"{sch}"."{v}"'
     order_by = _view_order_by_clause(
@@ -204,27 +236,6 @@ def fetch_vendor_master_rows_from_approval_view(
     return fetch_vendor_master_rows_from_view(**kwargs, view=VENDOR_MASTER_APPROVAL_VIEW)
 
 
-def _pg_connect(
-    host: str, port: int, dbname: str, user: str, password: str
-) -> Any:
-    """Try psycopg3 then psycopg2."""
-    try:
-        import psycopg  # type: ignore
-        return psycopg.connect(
-            host=host, port=port, dbname=dbname, user=user, password=password, connect_timeout=15
-        )
-    except Exception:
-        try:
-            import psycopg2  # type: ignore
-            return psycopg2.connect(
-                host=host, port=port, dbname=dbname, user=user, password=password, connect_timeout=15
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Could not connect to Postgres. Install: pip install psycopg[binary] or psycopg2-binary"
-            ) from e
-
-
 def fetch_vendor_master_rows_from_view(
     *,
     host: str | None = None,
@@ -284,6 +295,99 @@ def fetch_vendor_master_rows_from_view(
                 if not batch:
                     break
                 for row in batch:
+                    out.append(tuple(row))
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return out
+
+
+def fetch_catalog_text_view_rows(
+    *,
+    view: str,
+    col_text: str,
+    col_id: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    dbname: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    schema: str | None = None,
+    rows_limit: int | None = None,
+) -> list[tuple[Any, ...]]:
+    """
+    Fetch rows from a small text catalog view (main code, sub code, UOM).
+
+    Returns (id, text) tuples ordered by ``id`` when the view has an id column;
+    otherwise (text,) only ordered by ``col_text``.
+
+    Views expose: id (bigint), ItemMainCode_Name / ItemSubCode_Name / UOM_Description.
+    """
+    h = host or PG_HOST
+    p = int(port or PG_PORT)
+    db = dbname or PG_DATABASE
+    u = user or PG_USER
+    pw = password or PG_PASSWORD
+    sch = schema or PG_SCHEMA
+
+    conn = _pg_connect(h, p, db, u, pw)
+    ident = f'"{sch}"."{view}"'
+    limit_sql = " LIMIT %s" if rows_limit is not None else ""
+
+    use_id = False
+    if col_id:
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s AND lower(column_name) = lower(%s)
+                    LIMIT 1
+                    """,
+                    (sch, view, col_id),
+                )
+                use_id = cur.fetchone() is not None
+            finally:
+                cur.close()
+        except Exception:
+            use_id = False
+
+    if use_id and col_id:
+        order_by = _sql_quote_ident(col_id)
+        select_cols = f'{_sql_quote_ident(col_id)}, {_sql_quote_ident(col_text)}'
+        expected_cols = 2
+    else:
+        order_by = _sql_quote_ident(col_text)
+        select_cols = _sql_quote_ident(col_text)
+        expected_cols = 1
+
+    sql = f"SELECT {select_cols} FROM {ident} ORDER BY {order_by} NULLS LAST{limit_sql}"
+
+    out: list[tuple[Any, ...]] = []
+    try:
+        cur = conn.cursor()
+        try:
+            if rows_limit is not None:
+                cur.execute(sql, (int(rows_limit),))
+            else:
+                cur.execute(sql)
+            while True:
+                batch = cur.fetchmany(5000)
+                if not batch:
+                    break
+                for row in batch:
+                    if len(row) != expected_cols:
+                        raise ValueError(f"Expected {expected_cols} columns from {view}, got {len(row)}")
                     out.append(tuple(row))
         finally:
             try:

@@ -3,12 +3,24 @@ FastAPI application: Item Master duplicate engine APIs.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from Catalog_Variant_Engine import check_catalog_text_variant
 from Config import (
     DUPLICATE_ENGINE_TEXT_THRESHOLD,
+    ITEM_MAIN_CODE_COL,
+    ITEM_MAIN_CODE_VIEW,
+    ITEM_SUB_CODE_COL,
+    ITEM_SUB_CODE_VIEW,
+    MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
+    SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
+    UOM_COL,
+    UOM_VARIANT_CHECK_TEXT_THRESHOLD,
+    UOM_VIEW,
     VARIANT_CHECK_TEXT_THRESHOLD,
     VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
 )
@@ -54,6 +66,15 @@ from Schemas import (
     VendorSTRNVariantCheckRequest,
     VendorVariantDuplicateCheckResponse,
     VendorVariantMatch,
+    MainCodeVariantCheckRequest,
+    MainCodeVariantDuplicateCheckResponse,
+    MainCodeVariantMatch,
+    SubCodeVariantCheckRequest,
+    SubCodeVariantDuplicateCheckResponse,
+    SubCodeVariantMatch,
+    UOMVariantCheckRequest,
+    UOMVariantDuplicateCheckResponse,
+    UOMVariantMatch,
 )
 from Vendor_Master_Duplicate_Engine import (
     IDX_CNIC,
@@ -75,7 +96,11 @@ logger = get_logger("style_textile.api")
 app = FastAPI(
     title="STYLE TEXTILE AI BACKEND",
     version="1.0.0",
-    openapi_tags=[{"name": "ITEM MASTER APIS", "description": "Item Master data and duplicate detection."}],
+    openapi_tags=[
+        {"name": "ITEM MASTER APIS", "description": "Item Master data and duplicate detection."},
+        {"name": "VENDOR MASTER APIS", "description": "Vendor Master duplicate detection and variant checks."},
+        {"name": "CATALOG APIS", "description": "Main code, sub code, and UOM variant duplicate checks (runtime embeddings)."},
+    ],
 )
 
 app.add_middleware(
@@ -623,6 +648,82 @@ def vendor_master_check_duplicate_name(
         sum(1 for m in matches if m.location == "approval"),
     )
     return VendorVariantDuplicateCheckResponse(status=status, matches=matches)
+
+
+def _catalog_variant_response(
+    payload: dict,
+    *,
+    match_cls: type,
+    response_cls: type,
+) -> Any:
+    matches = [match_cls.model_validate(m) for m in payload.get("matches", [])]
+    return response_cls(status=payload["status"], matches=matches)
+
+
+@app.post(
+    "/Main-Code-check-duplicate-variant",
+    response_model=MainCodeVariantDuplicateCheckResponse,
+    summary="Check if a candidate main code name is a duplicate (runtime embeddings)",
+    tags=["CATALOG APIS"],
+)
+def main_code_check_duplicate_variant(
+    req: MainCodeVariantCheckRequest,
+) -> MainCodeVariantDuplicateCheckResponse:
+    logger.info("POST /Main-Code-check-duplicate-variant — start | MainCodeName=%r", req.MainCodeName)
+    payload = check_catalog_text_variant(
+        req.MainCodeName,
+        view=ITEM_MAIN_CODE_VIEW,
+        col_text=ITEM_MAIN_CODE_COL,
+        match_value_key="MainCodeName",
+        threshold=MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
+    )
+    return _catalog_variant_response(
+        payload, match_cls=MainCodeVariantMatch, response_cls=MainCodeVariantDuplicateCheckResponse
+    )
+
+
+@app.post(
+    "/Sub-Code-check-duplicate-variant",
+    response_model=SubCodeVariantDuplicateCheckResponse,
+    summary="Check if a candidate sub code name is a duplicate (runtime embeddings)",
+    tags=["CATALOG APIS"],
+)
+def sub_code_check_duplicate_variant(
+    req: SubCodeVariantCheckRequest,
+) -> SubCodeVariantDuplicateCheckResponse:
+    logger.info("POST /Sub-Code-check-duplicate-variant — start | SubCodeName=%r", req.SubCodeName)
+    payload = check_catalog_text_variant(
+        req.SubCodeName,
+        view=ITEM_SUB_CODE_VIEW,
+        col_text=ITEM_SUB_CODE_COL,
+        match_value_key="SubCodeName",
+        threshold=SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
+    )
+    return _catalog_variant_response(
+        payload, match_cls=SubCodeVariantMatch, response_cls=SubCodeVariantDuplicateCheckResponse
+    )
+
+
+@app.post(
+    "/UOM-check-duplicate-variant",
+    response_model=UOMVariantDuplicateCheckResponse,
+    summary="Check if a candidate UOM description is a duplicate (runtime embeddings)",
+    tags=["CATALOG APIS"],
+)
+def uom_check_duplicate_variant(
+    req: UOMVariantCheckRequest,
+) -> UOMVariantDuplicateCheckResponse:
+    logger.info("POST /UOM-check-duplicate-variant — start | UOMDescription=%r", req.UOMDescription)
+    payload = check_catalog_text_variant(
+        req.UOMDescription,
+        view=UOM_VIEW,
+        col_text=UOM_COL,
+        match_value_key="UOMDescription",
+        threshold=UOM_VARIANT_CHECK_TEXT_THRESHOLD,
+    )
+    return _catalog_variant_response(
+        payload, match_cls=UOMVariantMatch, response_cls=UOMVariantDuplicateCheckResponse
+    )
 
 
 if __name__ == "__main__":

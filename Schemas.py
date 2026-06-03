@@ -243,3 +243,54 @@ class VendorAccountNoVariantCheckRequest(BaseModel):
 
 class VendorIBANVariantCheckRequest(BaseModel):
     IBAN: str = Field(..., description="Candidate IBAN value to check for duplicates.")
+
+
+# ─── Main code / Sub code / UOM variant check ──────────────────────────────────
+
+
+class MainCodeVariantCheckRequest(BaseModel):
+    MainCodeName: str = Field(..., description="Candidate main code name (maps to ItemMainCode_Name).")
+
+
+class MainCodeVariantMatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    MainCodeName: str
+    row: int = Field(..., serialization_alias="row#", description="View id column (ORDER BY id).")
+
+
+class MainCodeVariantDuplicateCheckResponse(BaseModel):
+    status: Literal["duplicate", "unique"]
+    matches: list[MainCodeVariantMatch] = Field(default_factory=list)
+
+
+class SubCodeVariantCheckRequest(BaseModel):
+    SubCodeName: str = Field(..., description="Candidate sub code name (maps to ItemSubCode_Name).")
+
+
+class SubCodeVariantMatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    SubCodeName: str
+    row: int = Field(..., serialization_alias="row#", description="View id column (ORDER BY id).")
+
+
+class SubCodeVariantDuplicateCheckResponse(BaseModel):
+    status: Literal["duplicate", "unique"]
+    matches: list[SubCodeVariantMatch] = Field(default_factory=list)
+
+
+class UOMVariantCheckRequest(BaseModel):
+    UOMDescription: str = Field(..., description="Candidate UOM description (maps to UOM_Description).")
+
+
+class UOMVariantMatch(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    UOMDescription: str
+    row: int = Field(..., serialization_alias="row#", description="View id column (ORDER BY id).")
+
+
+class UOMVariantDuplicateCheckResponse(BaseModel):
+    status: Literal["duplicate", "unique"]
+    matches: list[UOMVariantMatch] = Field(default_factory=list)

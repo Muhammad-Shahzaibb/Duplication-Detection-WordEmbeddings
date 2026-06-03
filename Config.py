@@ -25,6 +25,7 @@ PG_DATABASE = os.environ.get("PGDATABASE", "Style")
 PG_USER = os.environ.get("PGUSER", "postgres")
 PG_PASSWORD = os.environ.get("PGPASSWORD", "postgres")
 PG_SCHEMA = os.environ.get("PGSCHEMA", "public")
+PG_CONNECT_TIMEOUT = int(os.environ.get("PG_CONNECT_TIMEOUT", "30"))
 
 # Item Master view name (override via ITEM_MASTER_VIEW)
 ITEM_MASTER_VIEW = os.environ.get("ITEM_MASTER_VIEW", "vw_item_master_view2")
@@ -65,6 +66,25 @@ ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", "").strip()
 DUPLICATE_ENGINE_TEXT_THRESHOLD = float(os.environ.get("DUPLICATE_ENGINE_TEXT_THRESHOLD", "0.985"))
 VARIANT_CHECK_TEXT_THRESHOLD = float(os.environ.get("VARIANT_CHECK_TEXT_THRESHOLD", "0.97"))
 
+# Main code / sub code / UOM catalog views (runtime embeddings only; not cached).
+ITEM_MAIN_CODE_VIEW = os.environ.get("ITEM_MAIN_CODE_VIEW", "vw_item_main_code")
+ITEM_MAIN_CODE_COL = os.environ.get("ITEM_MAIN_CODE_COL", "ItemMainCode_Name")
+ITEM_SUB_CODE_VIEW = os.environ.get("ITEM_SUB_CODE_VIEW", "vw_item_sub_code")
+ITEM_SUB_CODE_COL = os.environ.get("ITEM_SUB_CODE_COL", "ItemSubCode_Name")
+UOM_VIEW = os.environ.get("UOM_VIEW", "vw_uom")
+UOM_COL = os.environ.get("UOM_COL", "UOM_Description")
+CATALOG_COL_ID = os.environ.get("CATALOG_COL_ID", "id")
+# Per-catalog cosine thresholds (runtime variant checks; not cached).
+MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
+    os.environ.get("MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD", "0.97")
+)
+SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
+    os.environ.get("SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD", "0.97")
+)
+UOM_VARIANT_CHECK_TEXT_THRESHOLD = float(
+    os.environ.get("UOM_VARIANT_CHECK_TEXT_THRESHOLD", "0.97")
+)
+
 
 def load_dotenv() -> None:
     """Load KEY=VALUE pairs from .env in APP_DIR or cwd (does not override existing env)."""
@@ -86,17 +106,22 @@ def load_dotenv() -> None:
             continue
 
     # Refresh derived settings after .env load
-    global PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD, PG_SCHEMA
+    global PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD, PG_SCHEMA, PG_CONNECT_TIMEOUT
     global ITEM_MASTER_VIEW, ITEM_MASTER_APPROVAL_VIEW, ITEM_MASTER_ORDER_BY
     global DUPLICATE_ENGINE_TEXT_THRESHOLD, VARIANT_CHECK_TEXT_THRESHOLD
     global VENDOR_MASTER_VIEW, VENDOR_MASTER_ORDER_BY, VENDOR_NAME_TEXT_THRESHOLD
     global VENDOR_VARIANT_CHECK_NAME_THRESHOLD, VENDOR_MASTER_APPROVAL_VIEW
+    global ITEM_MAIN_CODE_VIEW, ITEM_MAIN_CODE_COL, ITEM_SUB_CODE_VIEW, ITEM_SUB_CODE_COL
+    global UOM_VIEW, UOM_COL, CATALOG_COL_ID
+    global MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD, SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD
+    global UOM_VARIANT_CHECK_TEXT_THRESHOLD
     PG_HOST = os.environ.get("PGHOST", PG_HOST)
     PG_PORT = int(os.environ.get("PGPORT", str(PG_PORT)))
     PG_DATABASE = os.environ.get("PGDATABASE", PG_DATABASE)
     PG_USER = os.environ.get("PGUSER", PG_USER)
     PG_PASSWORD = os.environ.get("PGPASSWORD", PG_PASSWORD)
     PG_SCHEMA = os.environ.get("PGSCHEMA", PG_SCHEMA)
+    PG_CONNECT_TIMEOUT = int(os.environ.get("PG_CONNECT_TIMEOUT", str(PG_CONNECT_TIMEOUT)))
     ITEM_MASTER_VIEW = os.environ.get("ITEM_MASTER_VIEW", ITEM_MASTER_VIEW)
     ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", ITEM_MASTER_APPROVAL_VIEW)
     ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", ITEM_MASTER_ORDER_BY).strip()
@@ -116,6 +141,31 @@ def load_dotenv() -> None:
         os.environ.get(
             "VENDOR_VARIANT_CHECK_NAME_THRESHOLD",
             str(VENDOR_VARIANT_CHECK_NAME_THRESHOLD),
+        )
+    )
+    ITEM_MAIN_CODE_VIEW = os.environ.get("ITEM_MAIN_CODE_VIEW", ITEM_MAIN_CODE_VIEW)
+    ITEM_MAIN_CODE_COL = os.environ.get("ITEM_MAIN_CODE_COL", ITEM_MAIN_CODE_COL)
+    ITEM_SUB_CODE_VIEW = os.environ.get("ITEM_SUB_CODE_VIEW", ITEM_SUB_CODE_VIEW)
+    ITEM_SUB_CODE_COL = os.environ.get("ITEM_SUB_CODE_COL", ITEM_SUB_CODE_COL)
+    UOM_VIEW = os.environ.get("UOM_VIEW", UOM_VIEW)
+    UOM_COL = os.environ.get("UOM_COL", UOM_COL)
+    CATALOG_COL_ID = os.environ.get("CATALOG_COL_ID", CATALOG_COL_ID)
+    MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
+        os.environ.get(
+            "MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD",
+            str(MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD),
+        )
+    )
+    SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
+        os.environ.get(
+            "SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD",
+            str(SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD),
+        )
+    )
+    UOM_VARIANT_CHECK_TEXT_THRESHOLD = float(
+        os.environ.get(
+            "UOM_VARIANT_CHECK_TEXT_THRESHOLD",
+            str(UOM_VARIANT_CHECK_TEXT_THRESHOLD),
         )
     )
 
