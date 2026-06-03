@@ -7,20 +7,26 @@ import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from Config import DUPLICATE_ENGINE_TEXT_THRESHOLD, VARIANT_CHECK_TEXT_THRESHOLD
-from Db_View import fetch_item_master_rows_from_approval_view, fetch_item_master_rows_from_view
+from Config import (
+    DUPLICATE_ENGINE_TEXT_THRESHOLD,
+    VARIANT_CHECK_TEXT_THRESHOLD,
+    VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
+)
+from Db_View import (
+    fetch_item_master_rows_from_view,
+    fetch_vendor_master_rows_from_approval_view,
+    fetch_vendor_master_rows_from_view,
+)
 from Item_Master_Duplicate_Engine import (
-    load_or_build_embeddings_matrix_for_schema_records,
+    embed_item_master_approval_view_at_runtime,
     rebuild_item_master_embeddings_cache,
     row_to_schema_json,
     run_item_master_duplicate_engine,
 )
 from embeddings import (
-    EMBED_APPROVAL_CACHE_FILE,
     EMBED_CACHE_FILE,
     EMBED_MODEL,
     build_embedding_text,
-    describe_embedding_cache_action,
     embed_texts_local,
     find_duplicate_groups_by_text_and_numeric,
     find_variant_matches_with_threshold,
@@ -38,6 +44,29 @@ from Schemas import (
     ItemMasterVariantDuplicateCheckRequest,
     ItemMasterVariantDuplicateCheckResponse,
     VariantDuplicateMatch,
+    VendorAccountNoVariantCheckRequest,
+    VendorCNICVariantCheckRequest,
+    VendorIBANVariantCheckRequest,
+    VendorMasterDuplicateEngineResponse,
+    VendorMasterUpdateEmbeddingsResponse,
+    VendorNameVariantCheckRequest,
+    VendorNTNVariantCheckRequest,
+    VendorSTRNVariantCheckRequest,
+    VendorVariantDuplicateCheckResponse,
+    VendorVariantMatch,
+)
+from Vendor_Master_Duplicate_Engine import (
+    IDX_CNIC,
+    IDX_IBAN,
+    IDX_ACCOUNT_NO,
+    IDX_NTN,
+    IDX_STRN,
+    embed_vendor_approval_names_at_runtime,
+    load_vendor_main_embeddings_reuse_if_present,
+    match_vendor_name_variant,
+    match_vendor_numeric_variant,
+    rebuild_vendor_embeddings_cache,
+    run_vendor_master_duplicate_engine,
 )
 
 setup_logging()
@@ -149,30 +178,6 @@ def item_master_update_embeddings() -> ItemMasterUpdateEmbeddingsResponse:
 
 
 @app.post(
-    "/Item-Master-update-approval-embeddings",
-    response_model=ItemMasterUpdateEmbeddingsResponse,
-    summary="Refresh approval queue embedding cache from the approval view",
-    tags=["ITEM MASTER APIS"],
-)
-def item_master_update_approval_embeddings() -> ItemMasterUpdateEmbeddingsResponse:
-    logger.info("POST /Item-Master-update-approval-embeddings — start (approval cache, force COMPUTE)")
-    tuples = fetch_item_master_rows_from_approval_view()
-    logger.info("Approval view rows fetched: %s", len(tuples))
-    records = [
-        row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
-        for it, mg, sg, desc in tuples
-    ]
-    payload = rebuild_item_master_embeddings_cache(records, cache_path=EMBED_APPROVAL_CACHE_FILE)
-    logger.info(
-        "POST /Item-Master-update-approval-embeddings — done | rows=%s dim=%s cache=%s",
-        payload.get("total_records"),
-        payload.get("embedding_dim"),
-        payload.get("cache_file"),
-    )
-    return ItemMasterUpdateEmbeddingsResponse.model_validate(payload)
-
-
-@app.post(
     "/Item-Master-check-duplicate-variant",
     response_model=ItemMasterVariantDuplicateCheckResponse,
     summary="Check if a single candidate ITEMDESC is an exact duplicate (cosine==1)",
@@ -208,16 +213,24 @@ def item_master_check_duplicate_variant(
             "Main embedding cache model does not match the active embedding model. "
             "Run /Item-Master-update-embeddings to refresh the cache."
         )
-    if int(meta_main.get("rows", -1)) != len(main_tuples):
-        raise RuntimeError(
-            "Main embedding cache row-count does not match current view rows. "
-            "Run /Item-Master-update-embeddings to refresh the cache."
-        )
     if int(meta_main.get("dim", -1)) != int(cand_vec.shape[0]):
         raise RuntimeError(
             "Main embedding cache dimension does not match candidate embedding. "
             "Run /Item-Master-update-embeddings to refresh the cache."
         )
+
+    # Force-reuse mode: do not fail on row-count mismatch; align defensively to avoid index errors.
+    if int(mat_main.shape[0]) != len(main_tuples):
+        logger.warning(
+            "DB embeddings: row mismatch (cache_vectors=%s view_rows=%s). "
+            "Proceeding in force-reuse mode using the aligned prefix only. "
+            "Run /Item-Master-update-embeddings to realign if needed.",
+            int(mat_main.shape[0]),
+            len(main_tuples),
+        )
+    n_main = min(int(mat_main.shape[0]), len(main_tuples))
+    mat_main = np.asarray(mat_main[:n_main], dtype=np.float32)
+    main_tuples = main_tuples[:n_main]
 
     main_numerics = _extract_tuple_numerics(main_tuples)
     db_matches = _threshold_variant_matches(
@@ -231,50 +244,11 @@ def item_master_check_duplicate_variant(
         len(db_matches), VARIANT_CHECK_TEXT_THRESHOLD, cand_numeric,
     )
 
-    # --- Approval embeddings (reuse or compute) ---
-    approval_tuples = fetch_item_master_rows_from_approval_view()
-    if not approval_tuples:
-        logger.info("Approval embeddings: skipped (approval view has 0 rows)")
-    else:
-        approval_records = [
-            row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
-            for it, mg, sg, desc in approval_tuples
-        ]
-        approval_min = schema_records_to_minimized(approval_records)
-        planned = describe_embedding_cache_action(
-            approval_min,
-            cache_path=EMBED_APPROVAL_CACHE_FILE,
-            model=EMBED_MODEL,
-        )
-        logger.info(
-            "Approval embeddings [%s]: planned action=%s | approval_rows=%s",
-            EMBED_APPROVAL_CACHE_FILE,
-            planned,
-            len(approval_tuples),
-        )
-
-        mat_ap, action = load_or_build_embeddings_matrix_for_schema_records(
-            approval_records,
-            cache_path=EMBED_APPROVAL_CACHE_FILE,
-        )
-        logger.info(
-            "Approval embeddings: %s | path=%s rows=%s",
-            "REUSED from cache" if action == "reuse" else "COMPUTED and saved",
-            EMBED_APPROVAL_CACHE_FILE,
-            len(approval_tuples),
-        )
-
-        _, meta_ap = load_embedding_cache(EMBED_APPROVAL_CACHE_FILE)
-        if str(meta_ap.get("model", "")) != EMBED_MODEL:
-            raise RuntimeError(
-                "Approval embedding cache model does not match the active embedding model. "
-                "Run /Item-Master-update-approval-embeddings to refresh."
-            )
-        if int(meta_ap.get("rows", -1)) != len(approval_tuples):
-            raise RuntimeError("Approval embedding cache row-count does not match approval view rows.")
-        if int(meta_ap.get("dim", -1)) != int(cand_vec.shape[0]):
-            raise RuntimeError("Approval embedding cache dimension does not match candidate embedding.")
-
+    # --- Approval embeddings (runtime only; never cached) ---
+    mat_ap, approval_tuples = embed_item_master_approval_view_at_runtime()
+    if approval_tuples:
+        if int(mat_ap.shape[1]) != int(cand_vec.shape[0]):
+            raise RuntimeError("Approval runtime embedding dimension does not match candidate embedding.")
         approval_numerics = _extract_tuple_numerics(approval_tuples)
         ap_matches = _threshold_variant_matches(
             mat_ap, approval_tuples, approval_numerics, cand_vec, cand_numeric,
@@ -283,9 +257,14 @@ def item_master_check_duplicate_variant(
         )
         matches.extend(ap_matches)
         logger.info(
-            "Approval embeddings: matches=%s (text_threshold=%.2f, cand_numeric=%r)",
-            len(ap_matches), VARIANT_CHECK_TEXT_THRESHOLD, cand_numeric,
+            "Approval embeddings (runtime): rows=%s matches=%s (text_threshold=%.2f, cand_numeric=%r)",
+            len(approval_tuples),
+            len(ap_matches),
+            VARIANT_CHECK_TEXT_THRESHOLD,
+            cand_numeric,
         )
+    else:
+        logger.info("Approval embeddings: skipped (approval view has 0 rows)")
 
     if not matches:
         logger.info("POST /Item-Master-check-duplicate-variant — done | status=unique")
@@ -303,7 +282,7 @@ def item_master_check_duplicate_variant(
 @app.post(
     "/Item-Master-check-duplicate-bulk",
     response_model=ItemMasterBulkDuplicateCheckResponse,
-    summary="Bulk duplicate check: intra-batch dedup then match against DB and approval caches",
+    summary="Bulk duplicate check: intra-batch dedup then match against DB cache and approval view",
     tags=["ITEM MASTER APIS"],
 )
 def item_master_check_duplicate_bulk(
@@ -315,7 +294,7 @@ def item_master_check_duplicate_bulk(
     1. Embed all submitted ITEMDESC values in **real-time** (no cache reuse).
        Detect exact-duplicate groups within the batch itself.
     2. For each unique representative, check against the **main DB** embeddings (cache reuse only)
-       and the **approval** embeddings (build/reuse same as variant check).
+       and **approval** embeddings (computed once per request from the approval view, not cached).
     """
     submitted = req.ITEMDESC
     total_submitted = len(submitted)
@@ -376,54 +355,37 @@ def item_master_check_duplicate_bulk(
         raise RuntimeError(
             "Main embedding cache model mismatch. Run /Item-Master-update-embeddings to refresh."
         )
-    if int(meta_main.get("rows", -1)) != len(main_tuples):
-        raise RuntimeError(
-            "Main embedding cache row-count does not match current view rows. "
-            "Run /Item-Master-update-embeddings to refresh."
-        )
     if int(meta_main.get("dim", -1)) != int(bulk_mat.shape[1]):
         raise RuntimeError(
             "Main embedding cache dimension does not match bulk embedding. "
             "Run /Item-Master-update-embeddings to refresh."
         )
 
-    # ── Load/build approval cache once ────────────────────────────────────────
-    mat_ap: np.ndarray | None = None
-    approval_tuples: list[tuple] = []
-    approval_tuples = fetch_item_master_rows_from_approval_view()
-    if not approval_tuples:
-        logger.info("Approval embeddings: skipped (0 rows in approval view)")
-    else:
-        approval_records = [
-            row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
-            for it, mg, sg, desc in approval_tuples
-        ]
-        approval_min = schema_records_to_minimized(approval_records)
-        planned = describe_embedding_cache_action(
-            approval_min, cache_path=EMBED_APPROVAL_CACHE_FILE, model=EMBED_MODEL
+    # Force-reuse mode: do not fail on row-count mismatch; align defensively to avoid index errors.
+    if int(mat_main.shape[0]) != len(main_tuples):
+        logger.warning(
+            "Bulk DB embeddings: row mismatch (cache_vectors=%s view_rows=%s). "
+            "Proceeding in force-reuse mode using the aligned prefix only. "
+            "Run /Item-Master-update-embeddings to realign if needed.",
+            int(mat_main.shape[0]),
+            len(main_tuples),
         )
+    n_main = min(int(mat_main.shape[0]), len(main_tuples))
+    mat_main = np.asarray(mat_main[:n_main], dtype=np.float32)
+    main_tuples = main_tuples[:n_main]
+
+    # ── Approval embeddings once per request (runtime only; not cached) ───────
+    mat_ap, approval_tuples = embed_item_master_approval_view_at_runtime()
+    if approval_tuples:
+        if int(mat_ap.shape[1]) != int(bulk_mat.shape[1]):
+            raise RuntimeError("Approval runtime embedding dimension does not match bulk embedding.")
         logger.info(
-            "Approval embeddings [%s]: planned action=%s | rows=%s",
-            EMBED_APPROVAL_CACHE_FILE, planned, len(approval_tuples),
-        )
-        mat_ap, ap_action = load_or_build_embeddings_matrix_for_schema_records(
-            approval_records, cache_path=EMBED_APPROVAL_CACHE_FILE
-        )
-        logger.info(
-            "Approval embeddings: %s | rows=%s",
-            "REUSED from cache" if ap_action == "reuse" else "COMPUTED and saved",
+            "Bulk approval embeddings (runtime): rows=%s dim=%s",
             len(approval_tuples),
+            int(mat_ap.shape[1]),
         )
-        _, meta_ap = load_embedding_cache(EMBED_APPROVAL_CACHE_FILE)
-        if str(meta_ap.get("model", "")) != EMBED_MODEL:
-            raise RuntimeError(
-                "Approval embedding cache model mismatch. "
-                "Run /Item-Master-update-approval-embeddings to refresh."
-            )
-        if int(meta_ap.get("rows", -1)) != len(approval_tuples):
-            raise RuntimeError("Approval embedding cache row-count does not match approval view rows.")
-        if int(meta_ap.get("dim", -1)) != int(bulk_mat.shape[1]):
-            raise RuntimeError("Approval embedding cache dimension does not match bulk embedding.")
+    else:
+        logger.info("Approval embeddings: skipped (0 rows in approval view)")
 
     # ── Pre-compute per-row numerics for DB and approval (done once, not per item) ──
     main_row_numerics = _extract_tuple_numerics(main_tuples)
@@ -445,7 +407,7 @@ def item_master_check_duplicate_bulk(
             location="db",
             text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
         )
-        if mat_ap is not None:
+        if approval_tuples:
             matches.extend(
                 _threshold_variant_matches(
                     mat_ap, approval_tuples, approval_row_numerics, cand_vec, cand_numeric,
@@ -475,6 +437,192 @@ def item_master_check_duplicate_bulk(
         intra_bulk_duplicate_groups=intra_bulk_groups,
         results=results,
     )
+
+
+@app.post(
+    "/Vendor-Master-duplicate-engine",
+    response_model=VendorMasterDuplicateEngineResponse,
+    summary="Run duplicate detection on Vendor Master view (6 fields checked independently)",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_duplicate_engine() -> VendorMasterDuplicateEngineResponse:
+    """
+    Fetches all rows from the Vendor Master view and checks 6 fields independently:
+
+    - **Name**       — embedding cosine similarity (VENDOR_NAME_TEXT_THRESHOLD)
+    - **CNIC**       — normalized exact match (strip special chars + leading zeros)
+    - **NTN**        — normalized exact match
+    - **STRN**       — normalized exact match
+    - **Account No** — normalized exact match
+    - **IBAN**       — normalized exact match
+
+    Each field result lists its own duplicate groups with row#, id, Name, and the field value.
+    """
+    logger.info("POST /Vendor-Master-duplicate-engine — start")
+    rows = fetch_vendor_master_rows_from_view()
+    logger.info("Vendor view rows fetched: %s", len(rows))
+    payload = run_vendor_master_duplicate_engine(rows)
+    logger.info(
+        "POST /Vendor-Master-duplicate-engine — done | total=%s "
+        "NAME_groups=%s CNIC_groups=%s NTN_groups=%s STRN_groups=%s ACCT_groups=%s IBAN_groups=%s",
+        payload.get("total_records"),
+        payload.get("duplicates_by_NAME", {}).get("duplicate_groups", 0),
+        payload.get("duplicates_by_CNIC", {}).get("duplicate_groups", 0),
+        payload.get("duplicates_by_NTN", {}).get("duplicate_groups", 0),
+        payload.get("duplicates_by_STRN", {}).get("duplicate_groups", 0),
+        payload.get("duplicates_by_ACCOUNT_NO", {}).get("duplicate_groups", 0),
+        payload.get("duplicates_by_IBAN", {}).get("duplicate_groups", 0),
+    )
+    return VendorMasterDuplicateEngineResponse.model_validate(payload)
+
+
+@app.post(
+    "/Vendor-Master-update-embeddings",
+    response_model=VendorMasterUpdateEmbeddingsResponse,
+    summary="Refresh Vendor Master name embedding cache from the vendor view",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_update_embeddings() -> VendorMasterUpdateEmbeddingsResponse:
+    """
+    Forces a full recomputation of the Vendor Name embedding cache
+    (``cache/vendor_embeddings_cache.npy``).  Call this after bulk vendor data changes.
+    """
+    logger.info("POST /Vendor-Master-update-embeddings — start (force COMPUTE)")
+    rows = fetch_vendor_master_rows_from_view()
+    logger.info("Vendor view rows fetched: %s", len(rows))
+    payload = rebuild_vendor_embeddings_cache(rows)
+    logger.info(
+        "POST /Vendor-Master-update-embeddings — done | rows=%s dim=%s cache=%s",
+        payload.get("total_records"),
+        payload.get("embedding_dim"),
+        payload.get("cache_file"),
+    )
+    return VendorMasterUpdateEmbeddingsResponse.model_validate(payload)
+
+
+def _vendor_numeric_variant_response(
+    field_label: str,
+    candidate_value: str,
+    col_idx: int,
+) -> VendorVariantDuplicateCheckResponse:
+    """Shared logic for the 5 numeric vendor variant check APIs."""
+    logger.info(
+        "POST /Vendor-Master-check-duplicate-%s — start | value=%r",
+        field_label, candidate_value,
+    )
+    db_rows = fetch_vendor_master_rows_from_view()
+    approval_rows = fetch_vendor_master_rows_from_approval_view()
+    logger.info(
+        "Vendor %s check: db_rows=%s approval_rows=%s",
+        field_label, len(db_rows), len(approval_rows),
+    )
+    raw_matches = match_vendor_numeric_variant(candidate_value, col_idx, db_rows, approval_rows)
+    matches = [VendorVariantMatch.model_validate(m) for m in raw_matches]
+    status = "duplicate" if matches else "unique"
+    logger.info(
+        "POST /Vendor-Master-check-duplicate-%s — done | status=%s matches=%s",
+        field_label, status, len(matches),
+    )
+    return VendorVariantDuplicateCheckResponse(status=status, matches=matches)
+
+
+@app.post(
+    "/Vendor-Master-check-duplicate-CNIC",
+    response_model=VendorVariantDuplicateCheckResponse,
+    summary="Check if a candidate CNIC already exists in Vendor Master or approval view",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_check_duplicate_cnic(
+    req: VendorCNICVariantCheckRequest,
+) -> VendorVariantDuplicateCheckResponse:
+    return _vendor_numeric_variant_response("CNIC", req.CNIC, IDX_CNIC)
+
+
+@app.post(
+    "/Vendor-Master-check-duplicate-NTN",
+    response_model=VendorVariantDuplicateCheckResponse,
+    summary="Check if a candidate NTN already exists in Vendor Master or approval view",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_check_duplicate_ntn(
+    req: VendorNTNVariantCheckRequest,
+) -> VendorVariantDuplicateCheckResponse:
+    return _vendor_numeric_variant_response("NTN", req.NTN, IDX_NTN)
+
+
+@app.post(
+    "/Vendor-Master-check-duplicate-STRN",
+    response_model=VendorVariantDuplicateCheckResponse,
+    summary="Check if a candidate STRN already exists in Vendor Master or approval view",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_check_duplicate_strn(
+    req: VendorSTRNVariantCheckRequest,
+) -> VendorVariantDuplicateCheckResponse:
+    return _vendor_numeric_variant_response("STRN", req.STRN, IDX_STRN)
+
+
+@app.post(
+    "/Vendor-Master-check-duplicate-AccountNo",
+    response_model=VendorVariantDuplicateCheckResponse,
+    summary="Check if a candidate Account No already exists in Vendor Master or approval view",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_check_duplicate_account_no(
+    req: VendorAccountNoVariantCheckRequest,
+) -> VendorVariantDuplicateCheckResponse:
+    return _vendor_numeric_variant_response("AccountNo", req.AccountNo, IDX_ACCOUNT_NO)
+
+
+@app.post(
+    "/Vendor-Master-check-duplicate-IBAN",
+    response_model=VendorVariantDuplicateCheckResponse,
+    summary="Check if a candidate IBAN already exists in Vendor Master or approval view",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_check_duplicate_iban(
+    req: VendorIBANVariantCheckRequest,
+) -> VendorVariantDuplicateCheckResponse:
+    return _vendor_numeric_variant_response("IBAN", req.IBAN, IDX_IBAN)
+
+
+@app.post(
+    "/Vendor-Master-check-duplicate-Name",
+    response_model=VendorVariantDuplicateCheckResponse,
+    summary="Check if a candidate vendor Name is a duplicate (embedding cosine similarity)",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_check_duplicate_name(
+    req: VendorNameVariantCheckRequest,
+) -> VendorVariantDuplicateCheckResponse:
+    logger.info("POST /Vendor-Master-check-duplicate-Name — start | Name=%r", req.Name)
+
+    # Main DB: load cached embeddings, reuse regardless of row-count mismatch
+    db_mat, db_rows = load_vendor_main_embeddings_reuse_if_present()
+    logger.info("Vendor Name check: db_rows=%s (cache aligned)", len(db_rows))
+
+    # Approval: embed at runtime, never saved
+    ap_mat, approval_rows = embed_vendor_approval_names_at_runtime()
+    logger.info("Vendor Name check: approval_rows=%s (runtime)", len(approval_rows))
+
+    raw_matches = match_vendor_name_variant(
+        req.Name,
+        db_rows,
+        db_mat,
+        approval_rows,
+        ap_mat,
+        threshold=VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
+    )
+    matches = [VendorVariantMatch.model_validate(m) for m in raw_matches]
+    status = "duplicate" if matches else "unique"
+    logger.info(
+        "POST /Vendor-Master-check-duplicate-Name — done | threshold=%.3f status=%s matches=%s (db=%s approval=%s)",
+        VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
+        status, len(matches),
+        sum(1 for m in matches if m.location == "db"),
+        sum(1 for m in matches if m.location == "approval"),
+    )
+    return VendorVariantDuplicateCheckResponse(status=status, matches=matches)
 
 
 if __name__ == "__main__":

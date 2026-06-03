@@ -73,7 +73,7 @@ class VariantDuplicateMatch(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     ITEMDESC: str
-    location: Literal["db", "approval"] = Field(..., description="Main DB cache or approval queue cache.")
+    location: Literal["db", "approval"] = Field(..., description="Main DB (cached) or approval queue (live view).")
     row: int = Field(..., serialization_alias="row#", description="1-based row index in that view (db or approval).")
 
 
@@ -126,5 +126,120 @@ class ItemMasterBulkDuplicateCheckResponse(BaseModel):
     )
     results: list[BulkItemResult] = Field(
         default_factory=list,
-        description="Per-unique-description match result against DB and approval caches.",
+        description="Per-unique-description match result against DB cache and approval view.",
     )
+
+
+# ─── Vendor Master ─────────────────────────────────────────────────────────────
+
+
+class VendorDuplicateGroup(BaseModel):
+    """One duplicate cluster for a vendor field."""
+
+    records: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Each record: id, Name, and the field value being compared "
+            "(field omitted for NAME groups)."
+        ),
+    )
+
+
+class VendorFieldResult(BaseModel):
+    """Duplicate detection result for one vendor field."""
+
+    duplicate_groups: int = Field(..., description="Number of duplicate clusters found.")
+    duplicate_records: int = Field(
+        ...,
+        description=(
+            "Count of extra duplicate rows across all groups (per group: size - 1; "
+            "one row per group is treated as the unique representative)."
+        ),
+    )
+    groups: dict[str, VendorDuplicateGroup] = Field(
+        default_factory=dict,
+        description="Keys DUP_1, DUP_2, …; each value has a records[] list.",
+    )
+
+
+class VendorMasterDuplicateEngineResponse(BaseModel):
+    """Full output of the Vendor Master duplicate engine."""
+
+    total_records: int = Field(..., description="Total vendor rows fetched from the view.")
+    duplicates_by_NAME: VendorFieldResult = Field(..., description="Duplicate groups detected by Name similarity.")
+    duplicates_by_CNIC: VendorFieldResult = Field(..., description="Duplicate groups detected by CNIC (normalized).")
+    duplicates_by_NTN: VendorFieldResult = Field(..., description="Duplicate groups detected by NTN (normalized).")
+    duplicates_by_STRN: VendorFieldResult = Field(..., description="Duplicate groups detected by STRN (normalized).")
+    duplicates_by_ACCOUNT_NO: VendorFieldResult = Field(..., description="Duplicate groups detected by Account No (normalized).")
+    duplicates_by_IBAN: VendorFieldResult = Field(..., description="Duplicate groups detected by IBAN (normalized).")
+
+
+class VendorMasterUpdateEmbeddingsResponse(BaseModel):
+    """Result of recomputing Vendor Master name embeddings."""
+
+    total_records: int = Field(..., description="Number of vendor rows embedded.")
+    embedding_dim: int = Field(..., description="Vector dimension (0 if no rows).")
+    cache_file: str = Field(default="", description="Absolute path to vendor_embeddings_cache.npy.")
+    metadata_file: str = Field(default="", description="Absolute path to vendor_embeddings_cache.npy.meta.json.")
+    model: str = Field(..., description="Sentence-transformers model used.")
+    rows_in_metadata: int = Field(..., description="Row count recorded in saved metadata.")
+
+
+# ─── Vendor Master variant check ───────────────────────────────────────────────
+
+
+class VendorVariantMatch(BaseModel):
+    """One matching vendor row returned by a variant check API."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: Any = Field(..., description="Vendor row id from the view.")
+    Name: str = Field(..., description="Vendor Name.")
+    field_value: str = Field(
+        default="",
+        description="Matched field value (the Name for name-check; raw field value for numeric checks).",
+    )
+    location: Literal["db", "approval"] = Field(
+        ..., description="Main DB view or approval view (live)."
+    )
+    row: int = Field(
+        ..., serialization_alias="row#", description="1-based row index in that view."
+    )
+
+
+class VendorVariantDuplicateCheckResponse(BaseModel):
+    """Output shared by all 6 vendor variant check APIs."""
+
+    status: Literal["duplicate", "unique"] = Field(
+        ..., description="duplicate if any match found; unique otherwise."
+    )
+    matches: list[VendorVariantMatch] = Field(
+        default_factory=list,
+        description="Matching vendor rows from main DB and/or approval view.",
+    )
+
+
+# ── Per-field request models ───────────────────────────────────────────────────
+
+class VendorNameVariantCheckRequest(BaseModel):
+    Name: str = Field(..., description="Candidate vendor Name to check for duplicates.")
+
+
+class VendorCNICVariantCheckRequest(BaseModel):
+    CNIC: str = Field(..., description="Candidate CNIC value to check for duplicates.")
+
+
+class VendorNTNVariantCheckRequest(BaseModel):
+    NTN: str = Field(..., description="Candidate NTN value to check for duplicates.")
+
+
+class VendorSTRNVariantCheckRequest(BaseModel):
+    STRN: str = Field(..., description="Candidate STRN (Sales Tax No) value to check for duplicates.")
+
+
+class VendorAccountNoVariantCheckRequest(BaseModel):
+    AccountNo: str = Field(..., description="Candidate Account No value to check for duplicates.")
+
+
+class VendorIBANVariantCheckRequest(BaseModel):
+    IBAN: str = Field(..., description="Candidate IBAN value to check for duplicates.")

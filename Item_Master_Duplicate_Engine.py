@@ -1,24 +1,22 @@
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 
 from Config import (
     DUPLICATE_ENGINE_TEXT_THRESHOLD,
-    EMBED_APPROVAL_CACHE_FILE,
-    ITEM_MASTER_APPROVAL_MINIMIZED_JSON,
-    ITEM_MASTER_APPROVAL_MINIMIZED_JSONL,
     ITEM_MASTER_MINIMIZED_JSON,
     ITEM_MASTER_MINIMIZED_JSONL,
 )
+from Db_View import fetch_item_master_rows_from_approval_view
 from embeddings import (
-    CacheAction,
     EMBED_BATCH,
     EMBED_CACHE_FILE,
     EMBED_MODEL,
+    build_embedding_text,
     build_faiss_index,
-    describe_embedding_cache_action,
+    embed_texts_local,
     find_duplicate_groups_by_text_and_numeric,
 )
 from jsonify import clean_str, row_to_schema_json, schema_records_to_minimized, write_minimized_embedding_input_json
@@ -27,16 +25,8 @@ from logging_setup import get_logger
 logger = get_logger("style_textile.engine")
 
 
-def _minimized_json_paths_for_embedding_cache(cache: str | Path) -> tuple[Path, Path]:
-    """JSONL + JSON paths paired with main vs approval embedding cache."""
-    c = Path(cache).resolve()
-    if c == Path(EMBED_APPROVAL_CACHE_FILE).resolve():
-        return ITEM_MASTER_APPROVAL_MINIMIZED_JSONL, ITEM_MASTER_APPROVAL_MINIMIZED_JSON
-    return ITEM_MASTER_MINIMIZED_JSONL, ITEM_MASTER_MINIMIZED_JSON
-
-
 def _write_minimized_json_before_embed(minimized: list[dict[str, Any]], *, cache_path: str | Path) -> tuple[Path, Path]:
-    jl, jp = _minimized_json_paths_for_embedding_cache(cache_path)
+    jl, jp = ITEM_MASTER_MINIMIZED_JSONL, ITEM_MASTER_MINIMIZED_JSON
     paths = write_minimized_embedding_input_json(minimized, jsonl_path=jl, json_path=jp)
     logger.info("Wrote minimized JSON (pre-embed): %s | %s", paths[0], paths[1])
     return paths
@@ -60,32 +50,24 @@ def _duplicate_group_column_status(rows_out: list[dict[str, Any]]) -> dict[str, 
     }
 
 
-def load_or_build_embeddings_matrix_for_schema_records(
-    records: list[dict[str, str]],
-    *,
-    cache_path: str | Path,
-    embed_model: str | None = None,
-    embed_batch: int | None = None,
-) -> tuple[np.ndarray, Literal["reuse", "compute"]]:
+def embed_item_master_approval_view_at_runtime() -> tuple[np.ndarray, list[tuple[Any, ...]]]:
     """
-    Return the embedding matrix for the given schema rows, reusing ``cache_path`` + ``.meta.json``
-    when they match current rows/model/content; otherwise compute and persist.
+    Fetch the approval view and embed all rows in memory (not written to disk).
+    Returns (matrix, view_tuples) with one vector per tuple row.
     """
-    model = embed_model if embed_model is not None else EMBED_MODEL
-    batch = embed_batch if embed_batch is not None else EMBED_BATCH
+    tuples = fetch_item_master_rows_from_approval_view()
+    if not tuples:
+        return np.zeros((0, 0), dtype=np.float32), []
+
+    records = [
+        row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
+        for it, mg, sg, desc in tuples
+    ]
     minimized = schema_records_to_minimized(records)
-    before: CacheAction = describe_embedding_cache_action(minimized, cache_path=str(cache_path), model=model)
-    _write_minimized_json_before_embed(minimized, cache_path=cache_path)
-    _index, mat = build_faiss_index(
-        minimized,
-        model=model,
-        batch_size=batch,
-        cache_path=str(cache_path),
-        reuse_only=False,
-        force_recompute=False,
-    )
-    action: Literal["reuse", "compute"] = "reuse" if before == "reuse" else "compute"
-    return np.asarray(mat, dtype=np.float32), action
+    texts = [build_embedding_text(r) for r in minimized]
+    logger.info("Approval view: computing %s runtime embeddings (not cached)", len(texts))
+    mat = embed_texts_local(texts, model_id=EMBED_MODEL)
+    return np.asarray(mat, dtype=np.float32), tuples
 
 
 def rebuild_item_master_embeddings_cache(
@@ -139,11 +121,13 @@ def run_item_master_duplicate_engine(
     embed_model: str | None = None,
     embed_batch: int | None = None,
     cache_path: str | Path | None = None,
-    reuse_only: bool = False,
 ) -> dict[str, Any]:
     """
-    Full pipeline: Step 1 regex minimization → Step 2 embeddings + exact duplicate groups.
-    Same logic as the former duplicate_detector_v2.py embed path.
+    Full pipeline: Step 1 regex minimization → Step 2 embeddings + duplicate groups.
+
+    Always reuses on-disk embedding cache when present (any row/model mismatch is ignored;
+    rows are aligned to min(cache_rows, view_rows)). Does not recompute embeddings — use
+    ``/Item-Master-update-embeddings`` to refresh the cache.
 
     Returns a plain dict suitable for ItemMasterDuplicateEngineResponse.
     """
@@ -162,13 +146,10 @@ def run_item_master_duplicate_engine(
             "duplicates": {},
         }
 
-    print(f"\n[Step 2] Embedding {total} rows locally (HF model)...")
+    print(f"\n[Step 2] Loading embeddings from cache (force reuse if present)...")
     print(f"         Model    : {model}")
-    print(f"         Batch    : {batch}")
-    print("         Exact duplicates only (identical embeddings)")
     print(f"         Cache    : {cache}")
-    if reuse_only:
-        print("         Cache mode: reuse-only (no recompute)")
+    print("         Cache mode: reuse-if-present (no recompute on duplicate engine)")
 
     _write_minimized_json_before_embed(minimized, cache_path=cache)
     _index, mat = build_faiss_index(
@@ -176,8 +157,25 @@ def run_item_master_duplicate_engine(
         model=model,
         batch_size=batch,
         cache_path=cache,
-        reuse_only=reuse_only,
+        reuse_if_present=True,
     )
+
+    n_aligned = min(int(mat.shape[0]), len(minimized))
+    if int(mat.shape[0]) != len(minimized):
+        logger.warning(
+            "Duplicate engine: cache/view row mismatch (cache_vectors=%s view_rows=%s). "
+            "Using aligned prefix of %s rows.",
+            int(mat.shape[0]),
+            len(minimized),
+            n_aligned,
+        )
+        print(
+            f"[Step 2] Cache/view row mismatch — using aligned prefix ({n_aligned} rows)"
+        )
+    mat = np.asarray(mat[:n_aligned], dtype=np.float32)
+    minimized = minimized[:n_aligned]
+    total = len(minimized)
+
     print(f"[Step 2] FAISS index built — {mat.shape[0]} vectors of dim {mat.shape[1]}")
     print("[Step 2] Searching for duplicate groups...")
 

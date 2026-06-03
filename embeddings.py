@@ -13,7 +13,6 @@ from typing import Any, Literal
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from Config import EMBED_APPROVAL_CACHE_FILE as _DEFAULT_APPROVAL_EMBED_CACHE_PATH
 from logging_setup import get_logger
 from Config import EMBED_CACHE_FILE as _DEFAULT_EMBED_CACHE_PATH
 
@@ -26,7 +25,6 @@ EMBED_BATCH = 256  # encoding batch size (CPU)
 
 # Default cache lives next to the deployed app (Config.py path).
 EMBED_CACHE_FILE = str(_DEFAULT_EMBED_CACHE_PATH)
-EMBED_APPROVAL_CACHE_FILE = str(_DEFAULT_APPROVAL_EMBED_CACHE_PATH)
 
 logger = get_logger("style_textile.embeddings")
 
@@ -212,12 +210,16 @@ def build_faiss_index(
     batch_size: int = EMBED_BATCH,
     cache_path: str | Path | None = EMBED_CACHE_FILE,
     reuse_only: bool = False,
+    reuse_if_present: bool = False,
     force_recompute: bool = False,
 ) -> tuple[Any, np.ndarray]:
     """
     Embed all records locally and build a FAISS flat inner-product index.
 
     If ``force_recompute`` is True, any existing cache is ignored and embeddings are recomputed.
+    If ``reuse_if_present`` is True, load on-disk cache whenever both .npy and .meta.json exist,
+    ignoring row-count/model mismatches (caller aligns rows to the view). Refuses to compute when
+    cache files are missing.
     """
     try:
         import faiss  # type: ignore
@@ -226,6 +228,8 @@ def build_faiss_index(
 
     if reuse_only and force_recompute:
         raise ValueError("reuse_only and force_recompute cannot both be true")
+    if reuse_if_present and force_recompute:
+        raise ValueError("reuse_if_present and force_recompute cannot both be true")
 
     total = len(records)
     digest = _texts_digest_records(records)
@@ -240,8 +244,20 @@ def build_faiss_index(
                     meta = json.loads(cache_meta.read_text(encoding="utf-8"))
                     mat_cached = np.load(cache_npy)
                     ok = _embedding_cache_can_reuse(meta, mat_cached, total=total, model=model)
-                    if ok:
-                        logger.info("Embedding cache REUSE: %s (%s rows)", cache_npy, total)
+                    if reuse_if_present or ok:
+                        if reuse_if_present and not ok:
+                            why = _embedding_cache_mismatch_reasons(
+                                records, cache_path=cache_npy, model=model
+                            )
+                            logger.warning(
+                                "Embedding cache FORCE REUSE: %s (view_rows=%s cache_rows=%s) | %s",
+                                cache_npy,
+                                total,
+                                int(mat_cached.shape[0]),
+                                "; ".join(why) if why else "unknown mismatch",
+                            )
+                        else:
+                            logger.info("Embedding cache REUSE: %s (%s rows)", cache_npy, total)
                         mat_cached = mat_cached.astype(np.float32)
                         dim = mat_cached.shape[1]
                         index = faiss.IndexFlatIP(dim)
@@ -261,14 +277,24 @@ def build_faiss_index(
                         "; ".join(why) if why else "unknown mismatch",
                     )
                 except Exception as e:
-                    # Preserve intentional reuse_only failures
+                    # Preserve intentional reuse_only / reuse_if_present failures
                     if reuse_only and isinstance(e, RuntimeError):
                         raise
                     if reuse_only:
                         raise RuntimeError("Embedding cache unreadable. Refusing to recompute (reuse_only).") from e
+                    if reuse_if_present:
+                        raise RuntimeError(
+                            f"Embedding cache unreadable at {cache_npy}. "
+                            "Run /Item-Master-update-embeddings to rebuild the cache."
+                        ) from e
                     logger.warning("Embedding cache unreadable — will COMPUTE: %s", cache_npy)
             elif reuse_only:
                 raise RuntimeError("Embedding cache not found. Refusing to compute embeddings (reuse_only).")
+            elif reuse_if_present:
+                raise RuntimeError(
+                    f"Embedding cache not found at {cache_npy}. "
+                    "Run /Item-Master-update-embeddings to build the cache before duplicate detection."
+                )
         else:
             logger.info("Embedding cache MISSING — will COMPUTE: %s (%s rows)", cache_npy, total)
 
