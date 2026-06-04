@@ -207,6 +207,8 @@ def run_item_master_duplicate_engine(
             }
             if "_item_code" in rec:
                 row_payload["ITEM_CODE"] = clean_str(rec.get("_item_code", ""))
+            if "_uom" in rec:
+                row_payload["UOM"] = clean_str(rec.get("_uom", ""))
             rows_out.append(row_payload)
         duplicates[dup_id] = {
             "status": _duplicate_group_column_status(rows_out),

@@ -272,6 +272,7 @@ def row_to_schema_json(
     main_group: Any = "",
     sub_group: Any = "",
     item_code: Any | None = None,
+    uom: Any | None = None,
 ) -> dict[str, str]:
     """
     Convert one row into a base record for the pipeline.
@@ -287,6 +288,8 @@ def row_to_schema_json(
     }
     if item_code is not None:
         out["_item_code"] = clean_str(item_code)
+    if uom is not None:
+        out["_uom"] = clean_str(uom)
     return out
 
 
@@ -402,6 +405,8 @@ def schema_records_to_minimized(records: list[dict[str, str]]) -> list[dict[str,
         }
         if "_item_code" in rec:
             out_rec["_item_code"] = rec.get("_item_code", "")
+        if "_uom" in rec:
+            out_rec["_uom"] = rec.get("_uom", "")
         minimized.append(out_rec)
     return minimized
 

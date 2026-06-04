@@ -147,14 +147,15 @@ def fetch_item_master_rows_from_view(
     col_sub_group: str = "SUBGROUP",
     col_item_description: str = "ITEMDESC",
     col_item_code: str = "ITEM_CODE",
+    col_uom: str = "UOM",
     include_item_code: bool = False,
 ) -> list[tuple[Any, ...]]:
     """
     Return rows as (ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC) tuples in **deterministic** order
     (ORDER BY on the four columns, or ``ITEM_MASTER_ORDER_BY`` from env / Config).
 
-    When ``include_item_code=True`` (main view / duplicate-engine only), each tuple also includes
-    ITEM_CODE as the fifth element.
+    When ``include_item_code=True`` (duplicate-engine only), each tuple also includes
+    ITEM_CODE and UOM as the fifth and sixth elements.
     """
     h = host or PG_HOST
     p = int(port or PG_PORT)
@@ -181,9 +182,9 @@ def fetch_item_master_rows_from_view(
     if include_item_code:
         select_cols = (
             f'"{col_item_type}", "{col_main_group}", "{col_sub_group}", '
-            f'"{col_item_description}", "{col_item_code}"'
+            f'"{col_item_description}", "{col_item_code}", "{col_uom}"'
         )
-        expected_cols = 5
+        expected_cols = 6
     else:
         select_cols = (
             f'"{col_item_type}", "{col_main_group}", "{col_sub_group}", "{col_item_description}"'

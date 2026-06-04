@@ -162,9 +162,14 @@ def item_master_duplicate_engine() -> ItemMasterDuplicateEngineResponse:
     logger.info("Main view rows fetched: %s", len(tuples))
     records = [
         row_to_schema_json(
-            item_description=desc, item_type=it, main_group=mg, sub_group=sg, item_code=code
+            item_description=desc,
+            item_type=it,
+            main_group=mg,
+            sub_group=sg,
+            item_code=code,
+            uom=uom,
         )
-        for it, mg, sg, desc, code in tuples
+        for it, mg, sg, desc, code, uom in tuples
     ]
     payload = run_item_master_duplicate_engine(records)
     logger.info(
