@@ -64,7 +64,7 @@ ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", "").strip()
 #                                    and by the DB/approval step in /Item-Master-check-duplicate-bulk.
 # Approval queue embeddings are computed at runtime only (not cached on disk).
 DUPLICATE_ENGINE_TEXT_THRESHOLD = float(os.environ.get("DUPLICATE_ENGINE_TEXT_THRESHOLD", "0.985"))
-VARIANT_CHECK_TEXT_THRESHOLD = float(os.environ.get("VARIANT_CHECK_TEXT_THRESHOLD", "0.97"))
+VARIANT_CHECK_TEXT_THRESHOLD = float(os.environ.get("VARIANT_CHECK_TEXT_THRESHOLD", "0.75"))
 
 # Main code / sub code / UOM catalog views (runtime embeddings only; not cached).
 ITEM_MAIN_CODE_VIEW = os.environ.get("ITEM_MAIN_CODE_VIEW", "vw_item_main_code")
