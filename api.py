@@ -9,7 +9,7 @@ import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from Catalog_Variant_Engine import check_catalog_text_variant
+from Catalog_Variant_Engine import check_catalog_text_variant, check_uom_variant
 from Config import (
     DUPLICATE_ENGINE_TEXT_THRESHOLD,
     ITEM_MAIN_CODE_COL,
@@ -18,9 +18,7 @@ from Config import (
     ITEM_SUB_CODE_VIEW,
     MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
     SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
-    UOM_COL,
     UOM_VARIANT_CHECK_TEXT_THRESHOLD,
-    UOM_VIEW,
     VARIANT_CHECK_TEXT_THRESHOLD,
     VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
 )
@@ -707,17 +705,15 @@ def sub_code_check_duplicate_variant(
 @app.post(
     "/UOM-check-duplicate-variant",
     response_model=UOMVariantDuplicateCheckResponse,
-    summary="Check if a candidate UOM description is a duplicate (runtime embeddings)",
+    summary="Check UOM duplicate: synonym dictionary first, then runtime embeddings",
     tags=["CATALOG APIS"],
 )
 def uom_check_duplicate_variant(
     req: UOMVariantCheckRequest,
 ) -> UOMVariantDuplicateCheckResponse:
     logger.info("POST /UOM-check-duplicate-variant — start | UOMDescription=%r", req.UOMDescription)
-    payload = check_catalog_text_variant(
+    payload = check_uom_variant(
         req.UOMDescription,
-        view=UOM_VIEW,
-        col_text=UOM_COL,
         match_value_key="UOMDescription",
         threshold=UOM_VARIANT_CHECK_TEXT_THRESHOLD,
     )
