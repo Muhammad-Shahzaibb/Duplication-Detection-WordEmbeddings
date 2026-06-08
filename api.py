@@ -3,6 +3,7 @@ FastAPI application: Item Master duplicate engine APIs.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import numpy as np
@@ -44,6 +45,7 @@ from embeddings import (
 )
 from jsonify import regex_extract_attributes, schema_records_to_minimized
 from logging_setup import get_logger, setup_logging
+from scheduler import start_embedding_scheduler, stop_embedding_scheduler
 from Schemas import (
     BulkItemResult,
     IntraBulkDuplicateGroup,
@@ -91,9 +93,20 @@ from Vendor_Master_Duplicate_Engine import (
 setup_logging()
 logger = get_logger("style_textile.api")
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("Starting embedding refresh scheduler")
+    start_embedding_scheduler()
+    yield
+    logger.info("Stopping embedding refresh scheduler")
+    stop_embedding_scheduler()
+
+
 app = FastAPI(
     title="STYLE TEXTILE AI BACKEND",
     version="1.0.0",
+    lifespan=lifespan,
     openapi_tags=[
         {"name": "ITEM MASTER APIS", "description": "Item Master data and duplicate detection."},
         {"name": "VENDOR MASTER APIS", "description": "Vendor Master duplicate detection and variant checks."},
