@@ -181,8 +181,9 @@ def item_master_duplicate_engine() -> ItemMasterDuplicateEngineResponse:
             sub_group=sg,
             item_code=code,
             uom=uom,
+            doc_no=doc_no,
         )
-        for it, mg, sg, desc, code, uom in tuples
+        for it, mg, sg, desc, code, uom, doc_no in tuples
     ]
     payload = run_item_master_duplicate_engine(records)
     logger.info(

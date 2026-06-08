@@ -29,7 +29,7 @@ class DuplicateGroupPayload(BaseModel):
     status: DuplicateGroupColumnStatus
     records: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Rows in the group: row#, ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC, ITEM_CODE, UOM (main view only)",
+        description="Rows in the group: row#, ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC, ITEM_CODE, UOM, DocNo (main view only)",
     )
 
 

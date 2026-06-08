@@ -148,6 +148,7 @@ def fetch_item_master_rows_from_view(
     col_item_description: str = "ITEMDESC",
     col_item_code: str = "ITEM_CODE",
     col_uom: str = "UOM",
+    col_doc_no: str = "DocNo",
     include_item_code: bool = False,
 ) -> list[tuple[Any, ...]]:
     """
@@ -155,7 +156,7 @@ def fetch_item_master_rows_from_view(
     (ORDER BY on the four columns, or ``ITEM_MASTER_ORDER_BY`` from env / Config).
 
     When ``include_item_code=True`` (duplicate-engine only), each tuple also includes
-    ITEM_CODE and UOM as the fifth and sixth elements.
+    ITEM_CODE, UOM, and DocNo as the fifth, sixth, and seventh elements.
     """
     h = host or PG_HOST
     p = int(port or PG_PORT)
@@ -182,9 +183,9 @@ def fetch_item_master_rows_from_view(
     if include_item_code:
         select_cols = (
             f'"{col_item_type}", "{col_main_group}", "{col_sub_group}", '
-            f'"{col_item_description}", "{col_item_code}", "{col_uom}"'
+            f'"{col_item_description}", "{col_item_code}", "{col_uom}", "{col_doc_no}"'
         )
-        expected_cols = 6
+        expected_cols = 7
     else:
         select_cols = (
             f'"{col_item_type}", "{col_main_group}", "{col_sub_group}", "{col_item_description}"'

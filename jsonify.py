@@ -208,8 +208,20 @@ KNOWN_PREFIXES = {
     "CABLE SIGNAL",
 }
 
-_UNIT = r"(?:MM|CM|M\b|FT|INCH|IN\b|UF|MFD|NF|PF|VDC|VAC|VCA|MA\b|TEX|V\b|W\b|KW|MW|HP|BAR|PSI|KGF?|GM|G\b|LB|OZ|RPM|NOS|MTR|YDS|\"|')"
+_UNIT = r"(?:MM|CM|M\b|FT|INCH|IN\b|UF|MFD|NF|PF|VDC|VAC|VCA|MA\b|TEX|GSM|V\b|W\b|KW|MW|HP|BAR|PSI|KGF?|GM|G\b|LB|OZ|RPM|NOS|MTR|YDS|\"|')"
 _DIM1 = re.compile(rf"^[\d.,/~\-]+\s*{_UNIT}$", re.IGNORECASE)
+
+# Pre-tokenisation unit-split pattern: inserts a space between a digit and an
+# immediately adjacent known unit so that "20mm" and "20 mm" tokenise identically.
+# Longer unit strings are listed first to avoid partial matches (e.g. KGF before KG).
+# The negative lookbehind (?<![/~\-]) prevents splitting fraction/range numerics
+# such as "1/2IN" (the '2' is preceded by '/', so it is left untouched).
+_UNIT_STUCK = re.compile(
+    r"(?<![/~\-])(\d)"
+    r"(INCH|MTR|MFD|KGF|GSM|VDC|VAC|VCA|NOS|YDS|RPM|PSI|BAR|KW|MW|HP|CM|MM|IN|GM|LB|OZ|TEX|MA|UF|NF|PF|KG|FT|M|W|G|V)"
+    r"(?=[^a-zA-Z]|$)",
+    re.IGNORECASE,
+)
 _DIM2 = re.compile(r'^[\d.]+[Xx\*][\d.]+(?:[Xx\*][\d.]+)?(?:MM|CM|"|FT|IN)?$', re.IGNORECASE)
 _DIM3 = re.compile(r'^[\d.]+["\'](?:[Xx\*][\d.]+["\'])+$', re.IGNORECASE)
 _NUM = re.compile(r"^[\d.,/~\-]+$")
@@ -236,13 +248,47 @@ def _strip_wrapping_quotes(s: str) -> str:
     return s
 
 
+def _normalize_itemdesc_for_extraction(desc: str) -> str:
+    """
+    Canonicalise spacing/punctuation in ITEMDESC before tokenisation.
+
+    Rules are derived from real patterns in ``vw_item_master_view2`` so that
+    user input variants (``IM#445599``, ``IM # 445599``, ``20mm``, ``20 mm``)
+    produce the same text/numeric split for duplicate detection.
+    """
+    d = clean_str(desc)
+    if not d:
+        return d
+
+    d = re.sub(r"\s+", " ", d)
+
+    # Word-attached hash: IM# / RMS# / REF# → IM # / RMS # / REF #
+    d = re.sub(r"([A-Za-z]+)#", r"\1 #", d)
+    # Hash-colon article codes: IM#:445681 → IM # : 445681
+    d = re.sub(r"#\s*:", "# :", d)
+    # Symbol before digits: #445599 → # 445599, @120 → @ 120
+    d = re.sub(r"([#@])\s*(\d)", r"\1 \2", d)
+    # Colon before digits when not a ratio like 1:2 (PRONG:100 → PRONG: 100)
+    d = re.sub(r"(?<!\d):\s*(\d)", r": \1", d)
+    # European decimal comma: 1,5 → 1.5 (does not touch thousands like 1,000)
+    d = re.sub(r"(\d),(\d{1,2})(?=[^\d]|$)", r"\1.\2", d)
+    # Digit glued to parenthetical spec: 1015(186GSM) → 1015 (186GSM)
+    d = re.sub(r"(\d)(\()", r"\1 \2", d)
+    # Digit glued to underscore code: 80023220_120C → 80023220 _120C
+    d = re.sub(r"(\d)(_[A-Za-z0-9])", r"\1 \2", d)
+    # Split stuck units: 20mm → 20 mm, 170GSM → 170 GSM, 120TEX → 120 TEX
+    d = _UNIT_STUCK.sub(r"\1 \2", d)
+
+    return d
+
+
 def regex_extract_attributes(desc: str) -> dict[str, str]:
     """
     Two-key normalization (order-invariant):
       1) text    : all non-numeric tokens (words, categories, etc.)
       2) numeric : any token containing a digit (codes, sizes, dimensions, etc.)
     """
-    d = clean_str(desc)
+    d = _normalize_itemdesc_for_extraction(desc)
     out = {k: "" for k in REGEX_EXTRACTION_KEYS}
     if not d:
         return out
@@ -253,6 +299,12 @@ def regex_extract_attributes(desc: str) -> dict[str, str]:
 
     for tok in tokens:
         t = tok.strip()
+        if not t:
+            continue
+        # Strip trailing commas/semicolons that may be copy-paste artefacts
+        # (e.g. "120/2," from an Excel cell → "120/2").
+        # Only strip from the trailing edge; never touch internal characters.
+        t = t.rstrip(",;")
         if not t:
             continue
         if re.search(r"\d", t):
@@ -273,6 +325,7 @@ def row_to_schema_json(
     sub_group: Any = "",
     item_code: Any | None = None,
     uom: Any | None = None,
+    doc_no: Any | None = None,
 ) -> dict[str, str]:
     """
     Convert one row into a base record for the pipeline.
@@ -290,6 +343,8 @@ def row_to_schema_json(
         out["_item_code"] = clean_str(item_code)
     if uom is not None:
         out["_uom"] = clean_str(uom)
+    if doc_no is not None:
+        out["_doc_no"] = clean_str(doc_no)
     return out
 
 
@@ -407,6 +462,8 @@ def schema_records_to_minimized(records: list[dict[str, str]]) -> list[dict[str,
             out_rec["_item_code"] = rec.get("_item_code", "")
         if "_uom" in rec:
             out_rec["_uom"] = rec.get("_uom", "")
+        if "_doc_no" in rec:
+            out_rec["_doc_no"] = rec.get("_doc_no", "")
         minimized.append(out_rec)
     return minimized
 
