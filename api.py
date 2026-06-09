@@ -30,6 +30,7 @@ from Db_View import (
 )
 from Item_Master_Duplicate_Engine import (
     embed_item_master_approval_view_at_runtime,
+    load_item_master_main_db_cache,
     rebuild_item_master_embeddings_cache,
     row_to_schema_json,
     run_item_master_duplicate_engine,
@@ -41,9 +42,8 @@ from embeddings import (
     embed_texts_local,
     find_duplicate_groups_by_text_and_numeric,
     find_variant_matches_with_threshold,
-    load_embedding_cache,
 )
-from jsonify import regex_extract_attributes, schema_records_to_minimized
+from jsonify import clean_str, normalize_item_description, regex_extract_attributes, schema_records_to_minimized
 from logging_setup import get_logger, setup_logging
 from scheduler import start_embedding_scheduler, stop_embedding_scheduler
 from Schemas import (
@@ -133,7 +133,7 @@ def _extract_tuple_numerics(tuples: list[tuple]) -> list[str]:
 
 def _threshold_variant_matches(
     mat: np.ndarray,
-    tuples: list[tuple],
+    row_itemdescs: list[str],
     row_numerics: list[str],
     cand_vec: np.ndarray,
     cand_numeric: str,
@@ -152,10 +152,9 @@ def _threshold_variant_matches(
     )
     out: list[VariantDuplicateMatch] = []
     for i in idxs:
-        desc = "" if tuples[i][3] is None else str(tuples[i][3])
         out.append(
             VariantDuplicateMatch(
-                ITEMDESC=desc,
+                ITEMDESC=row_itemdescs[i],
                 location=location,  # type: ignore[arg-type]
                 row=i + 1,
             )
@@ -170,22 +169,8 @@ def _threshold_variant_matches(
     tags=["ITEM MASTER APIS"],
 )
 def item_master_duplicate_engine() -> ItemMasterDuplicateEngineResponse:
-    logger.info("POST /Item-Master-duplicate-engine — start")
-    tuples = fetch_item_master_rows_from_view(include_item_code=True)
-    logger.info("Main view rows fetched: %s", len(tuples))
-    records = [
-        row_to_schema_json(
-            item_description=desc,
-            item_type=it,
-            main_group=mg,
-            sub_group=sg,
-            item_code=code,
-            uom=uom,
-            doc_no=doc_no,
-        )
-        for it, mg, sg, desc, code, uom, doc_no in tuples
-    ]
-    payload = run_item_master_duplicate_engine(records)
+    logger.info("POST /Item-Master-duplicate-engine — start (cache bundle only, no live DB)")
+    payload = run_item_master_duplicate_engine()
     logger.info(
         "POST /Item-Master-duplicate-engine — done | total=%s duplicate_records=%s groups=%s",
         payload.get("total_records"),
@@ -203,11 +188,19 @@ def item_master_duplicate_engine() -> ItemMasterDuplicateEngineResponse:
 )
 def item_master_update_embeddings() -> ItemMasterUpdateEmbeddingsResponse:
     logger.info("POST /Item-Master-update-embeddings — start (db cache, force COMPUTE)")
-    tuples = fetch_item_master_rows_from_view()
+    tuples = fetch_item_master_rows_from_view(include_item_code=True)
     logger.info("Main view rows fetched: %s", len(tuples))
     records = [
-        row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
-        for it, mg, sg, desc in tuples
+        row_to_schema_json(
+            item_description=desc,
+            item_type=it,
+            main_group=mg,
+            sub_group=sg,
+            item_code=code,
+            uom=uom,
+            doc_no=doc_no,
+        )
+        for it, mg, sg, desc, code, uom, doc_no in tuples
     ]
     payload = rebuild_item_master_embeddings_cache(records)
     logger.info(
@@ -244,11 +237,13 @@ def item_master_check_duplicate_variant(
 
     matches: list[VariantDuplicateMatch] = []
 
-    # --- Main DB embeddings (reuse only) ---
-    logger.info("DB embeddings [%s]: loading cache (reuse only, no compute)", EMBED_CACHE_FILE)
-    mat_main, meta_main = load_embedding_cache(EMBED_CACHE_FILE)
-    main_tuples = fetch_item_master_rows_from_view()
-    logger.info("DB embeddings: REUSED from cache | path=%s rows=%s", EMBED_CACHE_FILE, len(main_tuples))
+    # --- Main DB: full cache bundle (embeddings + row snapshot; no live DB) ---
+    logger.info(
+        "DB cache [%s]: loading embeddings + row snapshot (reuse only, no compute)",
+        EMBED_CACHE_FILE,
+    )
+    mat_main, meta_main, main_row_cache = load_item_master_main_db_cache()
+    logger.info("DB cache: REUSED | rows=%s", int(mat_main.shape[0]))
 
     if str(meta_main.get("model", "")) != EMBED_MODEL:
         raise RuntimeError(
@@ -261,22 +256,10 @@ def item_master_check_duplicate_variant(
             "Run /Item-Master-update-embeddings to refresh the cache."
         )
 
-    # Force-reuse mode: do not fail on row-count mismatch; align defensively to avoid index errors.
-    if int(mat_main.shape[0]) != len(main_tuples):
-        logger.warning(
-            "DB embeddings: row mismatch (cache_vectors=%s view_rows=%s). "
-            "Proceeding in force-reuse mode using the aligned prefix only. "
-            "Run /Item-Master-update-embeddings to realign if needed.",
-            int(mat_main.shape[0]),
-            len(main_tuples),
-        )
-    n_main = min(int(mat_main.shape[0]), len(main_tuples))
-    mat_main = np.asarray(mat_main[:n_main], dtype=np.float32)
-    main_tuples = main_tuples[:n_main]
-
-    main_numerics = _extract_tuple_numerics(main_tuples)
+    main_numerics = [(r.get("numeric") or "") for r in main_row_cache]
+    main_itemdescs = [clean_str(r.get("ITEMDESC", "")) for r in main_row_cache]
     db_matches = _threshold_variant_matches(
-        mat_main, main_tuples, main_numerics, cand_vec, cand_numeric,
+        mat_main, main_itemdescs, main_numerics, cand_vec, cand_numeric,
         location="db",
         text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
     )
@@ -292,8 +275,12 @@ def item_master_check_duplicate_variant(
         if int(mat_ap.shape[1]) != int(cand_vec.shape[0]):
             raise RuntimeError("Approval runtime embedding dimension does not match candidate embedding.")
         approval_numerics = _extract_tuple_numerics(approval_tuples)
+        approval_itemdescs = [
+            normalize_item_description(str(t[3]) if t[3] is not None else "")
+            for t in approval_tuples
+        ]
         ap_matches = _threshold_variant_matches(
-            mat_ap, approval_tuples, approval_numerics, cand_vec, cand_numeric,
+            mat_ap, approval_itemdescs, approval_numerics, cand_vec, cand_numeric,
             location="approval",
             text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
         )
@@ -387,11 +374,10 @@ def item_master_check_duplicate_bulk(
     unique_count = len(unique_indices)
     logger.info("Bulk: %s unique descriptions proceeding to DB/approval check", unique_count)
 
-    # ── Step 2: load main DB cache once for all unique items ───────────────────
-    logger.info("DB embeddings [%s]: loading cache (reuse only)", EMBED_CACHE_FILE)
-    mat_main, meta_main = load_embedding_cache(EMBED_CACHE_FILE)
-    main_tuples = fetch_item_master_rows_from_view()
-    logger.info("DB embeddings: REUSED | rows=%s", len(main_tuples))
+    # ── Step 2: load main DB cache bundle once for all unique items ────────────
+    logger.info("DB cache [%s]: loading embeddings + row snapshot (reuse only)", EMBED_CACHE_FILE)
+    mat_main, meta_main, main_row_cache = load_item_master_main_db_cache()
+    logger.info("DB cache: REUSED | rows=%s", int(mat_main.shape[0]))
 
     if str(meta_main.get("model", "")) != EMBED_MODEL:
         raise RuntimeError(
@@ -403,18 +389,8 @@ def item_master_check_duplicate_bulk(
             "Run /Item-Master-update-embeddings to refresh."
         )
 
-    # Force-reuse mode: do not fail on row-count mismatch; align defensively to avoid index errors.
-    if int(mat_main.shape[0]) != len(main_tuples):
-        logger.warning(
-            "Bulk DB embeddings: row mismatch (cache_vectors=%s view_rows=%s). "
-            "Proceeding in force-reuse mode using the aligned prefix only. "
-            "Run /Item-Master-update-embeddings to realign if needed.",
-            int(mat_main.shape[0]),
-            len(main_tuples),
-        )
-    n_main = min(int(mat_main.shape[0]), len(main_tuples))
-    mat_main = np.asarray(mat_main[:n_main], dtype=np.float32)
-    main_tuples = main_tuples[:n_main]
+    main_row_numerics = [(r.get("numeric") or "") for r in main_row_cache]
+    main_itemdescs = [clean_str(r.get("ITEMDESC", "")) for r in main_row_cache]
 
     # ── Approval embeddings once per request (runtime only; not cached) ───────
     mat_ap, approval_tuples = embed_item_master_approval_view_at_runtime()
@@ -429,11 +405,14 @@ def item_master_check_duplicate_bulk(
     else:
         logger.info("Approval embeddings: skipped (0 rows in approval view)")
 
-    # ── Pre-compute per-row numerics for DB and approval (done once, not per item) ──
-    main_row_numerics = _extract_tuple_numerics(main_tuples)
     approval_row_numerics = _extract_tuple_numerics(approval_tuples) if approval_tuples else []
+    approval_itemdescs = (
+        [normalize_item_description(str(t[3]) if t[3] is not None else "") for t in approval_tuples]
+        if approval_tuples
+        else []
+    )
     logger.info(
-        "Bulk DB/approval checks: text_threshold=%.2f + exact numeric match",
+        "Bulk checks: DB uses full cache bundle; approval uses live view | text_threshold=%.2f",
         VARIANT_CHECK_TEXT_THRESHOLD,
     )
 
@@ -445,14 +424,14 @@ def item_master_check_duplicate_bulk(
         cand_numeric = bulk_min[i].get("numeric") or ""
 
         matches: list[VariantDuplicateMatch] = _threshold_variant_matches(
-            mat_main, main_tuples, main_row_numerics, cand_vec, cand_numeric,
+            mat_main, main_itemdescs, main_row_numerics, cand_vec, cand_numeric,
             location="db",
             text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
         )
         if approval_tuples:
             matches.extend(
                 _threshold_variant_matches(
-                    mat_ap, approval_tuples, approval_row_numerics, cand_vec, cand_numeric,
+                    mat_ap, approval_itemdescs, approval_row_numerics, cand_vec, cand_numeric,
                     location="approval",
                     text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
                 )

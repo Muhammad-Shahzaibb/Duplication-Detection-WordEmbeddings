@@ -16,7 +16,8 @@ EMBED_CACHE_FILE: Path = CACHE_DIR / "embeddings_cache.npy"
 # Vendor Master name embedding cache.
 EMBED_VENDOR_CACHE_FILE: Path = CACHE_DIR / "vendor_embeddings_cache.npy"
 
-# Minimized JSON (text + numeric, same as embedding input) written before embedding.
+# Item Master row cache (text, numeric, display columns; index-aligned with embeddings_cache.npy).
+# Written only on /Item-Master-update-embeddings (or scheduler); read by duplicate engine + variant check.
 ITEM_MASTER_MINIMIZED_JSONL: Path = CACHE_DIR / "final_rows.jsonl"
 ITEM_MASTER_MINIMIZED_JSON: Path = CACHE_DIR / "final_rows.json"
 PG_HOST = os.environ.get("PGHOST", "163.61.91.149")
@@ -100,7 +101,10 @@ def load_dotenv() -> None:
                 k = k.strip()
                 if not k or k in os.environ:
                     continue
-                v = v.strip().strip('"').strip("'")
+                v = v.strip()
+                # Only unwrap when the *entire* value is quoted (preserve `"id" NULLS LAST`).
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                    v = v[1:-1]
                 os.environ[k] = v
         except Exception:
             continue

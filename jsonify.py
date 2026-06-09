@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -248,15 +249,14 @@ def _strip_wrapping_quotes(s: str) -> str:
     return s
 
 
-def _normalize_itemdesc_for_extraction(desc: str) -> str:
+def _apply_itemdesc_layout_rules(desc: str) -> str:
     """
-    Canonicalise spacing/punctuation in ITEMDESC before tokenisation.
+    Domain layout rules before tokenisation (hash codes, units, decimals, etc.).
 
-    Rules are derived from real patterns in ``vw_item_master_view2`` so that
-    user input variants (``IM#445599``, ``IM # 445599``, ``20mm``, ``20 mm``)
-    produce the same text/numeric split for duplicate detection.
+    Derived from real patterns in ``vw_item_master_view2`` so variants like
+    ``IM#445599``, ``IM # 445599``, ``20mm``, and ``20 mm`` tokenise the same way.
     """
-    d = clean_str(desc)
+    d = desc
     if not d:
         return d
 
@@ -279,7 +279,42 @@ def _normalize_itemdesc_for_extraction(desc: str) -> str:
     # Split stuck units: 20mm → 20 mm, 170GSM → 170 GSM, 120TEX → 120 TEX
     d = _UNIT_STUCK.sub(r"\1 \2", d)
 
-    return d
+    return d.strip()
+
+
+def normalize_item_description(desc: Any) -> str:
+    """
+    Canonical raw ITEMDESC before schema JSON, regex split, embedding, or cache.
+
+    Step 1 in the Item Master pipeline (cleansing engine, variant check, bulk check,
+    and embedding refresh). Unifies quotes, punctuation, spacing, and layout variants.
+    """
+    s = clean_str(desc)
+    if not s:
+        return s
+
+    s = unicodedata.normalize("NFKC", s)
+    # Unify curly/smart quotes to ASCII, then strip decorative quote characters.
+    s = s.translate(str.maketrans({
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        "\u00b4": "'", "`": "'", "´": "'",
+    }))
+    # 40's / 40's → 40s
+    s = re.sub(r"(?<=\w)['\u2019](?=\w)", "", s)
+    s = re.sub(r"['\"`´]", " ", s)
+
+    # Broad punctuation → space (keep . , / - ~ _ # @ : for codes, fractions, dimensions).
+    s = re.sub(r"[?!;*&|^\\<>~\[\]{}()]+", " ", s)
+    # Isolated colon not part of a code fragment → space
+    s = re.sub(r"(?<![\w#@])\s*:\s*(?![\d])", " ", s)
+    # Normalize slash/hyphen surrounded by spaces (keep 120/2, 10-12, 1.5mm intact)
+    s = re.sub(r"(?<!\d)\s*/\s*(?!\d)", " ", s)
+    s = re.sub(r"(?<![\d/])\s*-\s*(?![\d])", " ", s)
+
+    s = re.sub(r"\s+", " ", s).strip()
+    s = _strip_wrapping_quotes(s)
+    s = _apply_itemdesc_layout_rules(s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def regex_extract_attributes(desc: str) -> dict[str, str]:
@@ -288,7 +323,7 @@ def regex_extract_attributes(desc: str) -> dict[str, str]:
       1) text    : all non-numeric tokens (words, categories, etc.)
       2) numeric : any token containing a digit (codes, sizes, dimensions, etc.)
     """
-    d = _normalize_itemdesc_for_extraction(desc)
+    d = normalize_item_description(desc)
     out = {k: "" for k in REGEX_EXTRACTION_KEYS}
     if not d:
         return out
@@ -334,7 +369,7 @@ def row_to_schema_json(
     Hierarchy columns are kept as ``_item_*`` for duplicate-engine output only.
     """
     out: dict[str, str] = {
-        "_item_description": clean_str(item_description),
+        "_item_description": normalize_item_description(item_description),
         "_item_type": clean_str(item_type),
         "_main_group": clean_str(main_group),
         "_sub_group": clean_str(sub_group),
@@ -422,6 +457,25 @@ def write_json(rows: list[dict[str, str]], out_path: str | Path) -> Path:
     return out_path
 
 
+def minimized_row_to_cache_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """One index-aligned cache row: embedding inputs + display fields for duplicate-engine output."""
+    out: dict[str, Any] = {
+        "text": row.get("text"),
+        "numeric": row.get("numeric"),
+        "ITEM_TYPE": clean_str(row.get("_item_type", "")),
+        "MAINGROUP": clean_str(row.get("_main_group", "")),
+        "SUBGROUP": clean_str(row.get("_sub_group", "")),
+        "ITEMDESC": clean_str(row.get("_item_description", "")),
+    }
+    if "_item_code" in row:
+        out["ITEM_CODE"] = clean_str(row.get("_item_code", ""))
+    if "_uom" in row:
+        out["UOM"] = clean_str(row.get("_uom", ""))
+    if "_doc_no" in row:
+        out["DocNo"] = clean_str(row.get("_doc_no", ""))
+    return out
+
+
 def write_minimized_embedding_input_json(
     minimized: list[dict[str, Any]],
     *,
@@ -429,12 +483,12 @@ def write_minimized_embedding_input_json(
     json_path: str | Path,
 ) -> tuple[Path, Path]:
     """
-    Persist the same ``text`` / ``numeric`` structure used for embeddings (one row per view row),
-    as JSONL + pretty JSON, before ``build_faiss_index`` runs.
+    Persist the full Item Master row cache (text, numeric, and display columns),
+    index-aligned with ``embeddings_cache.npy``, as JSONL + pretty JSON.
     """
     jsonl_path = Path(jsonl_path)
     json_path = Path(json_path)
-    payload: list[dict[str, Any]] = [{"text": r.get("text"), "numeric": r.get("numeric")} for r in minimized]
+    payload: list[dict[str, Any]] = [minimized_row_to_cache_payload(r) for r in minimized]
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     with jsonl_path.open("w", encoding="utf-8") as f:
         for row in payload:
@@ -448,12 +502,12 @@ def schema_records_to_minimized(records: list[dict[str, str]]) -> list[dict[str,
     """Convert schema rows to minimized rows (regex extraction on ITEMDESC → text/numeric only)."""
     minimized: list[dict[str, Any]] = []
     for rec in records:
-        desc = (rec.get("_item_description") or "").strip()
+        desc = normalize_item_description(rec.get("_item_description") or "")
         extracted = regex_extract_attributes(desc)
         out_rec: dict[str, Any] = {
             "text": clean_str(extracted.get("text", "")) or None,
             "numeric": clean_str(extracted.get("numeric", "")) or None,
-            "_item_description": rec.get("_item_description", ""),
+            "_item_description": desc,
             "_item_type": rec.get("_item_type", ""),
             "_main_group": rec.get("_main_group", ""),
             "_sub_group": rec.get("_sub_group", ""),

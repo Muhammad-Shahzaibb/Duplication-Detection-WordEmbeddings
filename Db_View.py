@@ -3,6 +3,7 @@ Item Master and Vendor Master data pull from Postgres views (no duplicate logic)
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from Config import (
@@ -28,6 +29,29 @@ def _sql_quote_ident(name: str) -> str:
     if n.startswith('"') and n.endswith('"'):
         return n
     return '"' + n.replace('"', '""') + '"'
+
+
+def _resolve_order_by_clause(clause: str) -> str:
+    """
+    Normalize ORDER BY from env (no leading ``ORDER BY``).
+
+    Handles:
+    - ``id NULLS LAST`` → ``"id" NULLS LAST``
+    - ``"id" NULLS LAST`` → unchanged
+    - ``id" NULLS LAST`` → ``"id" NULLS LAST`` (mangled by naive quote stripping)
+    """
+    c = (clause or "").strip()
+    if not c:
+        return c
+    if c.startswith('"'):
+        return c
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\"\s+(.*)$", c)
+    if m:
+        return f"{_sql_quote_ident(m.group(1))} {m.group(2)}"
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(\s+.*)$", c)
+    if m:
+        return f"{_sql_quote_ident(m.group(1))}{m.group(2)}"
+    return c
 
 
 def _pg_connect_error(host: str, port: int, dbname: str, exc: BaseException) -> RuntimeError:
@@ -100,7 +124,7 @@ def _view_order_by_clause(
 ) -> str:
     """Stable ORDER BY for cache row alignment (override via Config.ITEM_MASTER_ORDER_BY)."""
     if ITEM_MASTER_ORDER_BY:
-        return ITEM_MASTER_ORDER_BY
+        return _resolve_order_by_clause(ITEM_MASTER_ORDER_BY)
     # Prefer stable primary key ordering when present (user requirement).
     try:
         cur = conn.cursor()
@@ -273,7 +297,11 @@ def fetch_vendor_master_rows_from_view(
     conn = _pg_connect(h, p, db, u, pw)
 
     ident = f'"{sch}"."{v}"'
-    order_by = VENDOR_MASTER_ORDER_BY or _sql_quote_ident(col_id)
+    order_by = (
+        _resolve_order_by_clause(VENDOR_MASTER_ORDER_BY)
+        if VENDOR_MASTER_ORDER_BY
+        else _sql_quote_ident(col_id)
+    )
     limit_sql = " LIMIT %s" if rows_limit is not None else ""
     select_cols = (
         f'{_sql_quote_ident(col_id)}, {_sql_quote_ident(col_name)}, '

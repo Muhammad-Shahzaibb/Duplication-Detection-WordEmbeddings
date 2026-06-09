@@ -18,6 +18,7 @@ from embeddings import (
     build_faiss_index,
     embed_texts_local,
     find_duplicate_groups_by_text_and_numeric,
+    load_embedding_cache,
 )
 from jsonify import clean_str, row_to_schema_json, schema_records_to_minimized, write_minimized_embedding_input_json
 from logging_setup import get_logger
@@ -30,6 +31,84 @@ def _write_minimized_json_before_embed(minimized: list[dict[str, Any]], *, cache
     paths = write_minimized_embedding_input_json(minimized, jsonl_path=jl, json_path=jp)
     logger.info("Wrote minimized JSON (pre-embed): %s | %s", paths[0], paths[1])
     return paths
+
+
+def load_item_master_minimized_cache(
+    jsonl_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Load per-row ``text`` / ``numeric`` written alongside the embedding cache.
+
+    Produced only by ``rebuild_item_master_embeddings_cache`` (or the scheduler).
+    """
+    path = Path(jsonl_path or ITEM_MASTER_MINIMIZED_JSONL)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Item Master minimized cache not found: {path}. "
+            "Run /Item-Master-update-embeddings to build embeddings and numeric cache."
+        )
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    if rows and "ITEMDESC" not in rows[0]:
+        logger.warning(
+            "Row cache at %s has text/numeric only (no display columns). "
+            "Run /Item-Master-update-embeddings to refresh the full cache bundle.",
+            path,
+        )
+    return rows
+
+
+def load_item_master_main_db_cache(
+    *,
+    cache_path: str | Path | None = None,
+    jsonl_path: str | Path | None = None,
+) -> tuple[np.ndarray, dict[str, Any], list[dict[str, Any]]]:
+    """
+    Load the main DB cache bundle: embeddings, metadata, and full row snapshots.
+
+    Row snapshots in ``final_rows.jsonl`` include text, numeric, and display columns
+    from the last ``/Item-Master-update-embeddings`` run. No live database fetch.
+    """
+    cache = cache_path if cache_path is not None else EMBED_CACHE_FILE
+    mat, meta = load_embedding_cache(cache)
+    row_cache = load_item_master_minimized_cache(jsonl_path)
+    n = min(int(mat.shape[0]), len(row_cache))
+    if int(mat.shape[0]) != len(row_cache):
+        logger.warning(
+            "Item Master cache row mismatch (embeddings=%s row_cache=%s). "
+            "Using aligned prefix of %s rows.",
+            int(mat.shape[0]),
+            len(row_cache),
+            n,
+        )
+    mat = np.asarray(mat[:n], dtype=np.float32)
+    return mat, meta, row_cache[:n]
+
+
+def _cached_numerics(row_cache: list[dict[str, Any]]) -> list[str]:
+    return [(r.get("numeric") or "") for r in row_cache]
+
+
+def _duplicate_row_payload(index: int, row: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "row#": index + 1,
+        "ITEM_TYPE": clean_str(row.get("ITEM_TYPE", "")),
+        "MAINGROUP": clean_str(row.get("MAINGROUP", "")),
+        "SUBGROUP": clean_str(row.get("SUBGROUP", "")),
+        "ITEMDESC": clean_str(row.get("ITEMDESC", "")),
+    }
+    if "ITEM_CODE" in row:
+        payload["ITEM_CODE"] = clean_str(row.get("ITEM_CODE", ""))
+    if "UOM" in row:
+        payload["UOM"] = clean_str(row.get("UOM", ""))
+    if "DocNo" in row:
+        payload["DocNo"] = clean_str(row.get("DocNo", ""))
+    return payload
 
 
 def _column_match_status(values: list[str]) -> str:
@@ -104,11 +183,13 @@ def rebuild_item_master_embeddings_cache(
     meta: dict[str, Any] = {}
     if meta_p is not None and meta_p.exists():
         meta = json.loads(meta_p.read_text(encoding="utf-8"))
+    jl, _jp = ITEM_MASTER_MINIMIZED_JSONL, ITEM_MASTER_MINIMIZED_JSON
     return {
         "total_records": total,
         "embedding_dim": int(mat.shape[1]) if mat.size else 0,
         "cache_file": str(cache_p) if cache_p else "",
         "metadata_file": str(meta_p) if meta_p else "",
+        "minimized_cache_file": str(jl.resolve()),
         "model": model,
         "text_digest": str(meta.get("text_digest", "")),
         "rows_in_metadata": int(meta.get("rows", total)),
@@ -116,27 +197,25 @@ def rebuild_item_master_embeddings_cache(
 
 
 def run_item_master_duplicate_engine(
-    records: list[dict[str, str]],
     *,
-    embed_model: str | None = None,
-    embed_batch: int | None = None,
     cache_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """
-    Full pipeline: Step 1 regex minimization → Step 2 embeddings + duplicate groups.
+    Duplicate detection on the main DB using the on-disk cache bundle only.
 
-    Always reuses on-disk embedding cache when present (any row/model mismatch is ignored;
-    rows are aligned to min(cache_rows, view_rows)). Does not recompute embeddings — use
-    ``/Item-Master-update-embeddings`` to refresh the cache.
+    Reads ``embeddings_cache.npy`` and ``final_rows.jsonl`` from the last
+    ``/Item-Master-update-embeddings`` run. No live database fetch.
 
     Returns a plain dict suitable for ItemMasterDuplicateEngineResponse.
     """
-    model = embed_model if embed_model is not None else EMBED_MODEL
-    batch = embed_batch if embed_batch is not None else EMBED_BATCH
     cache = cache_path if cache_path is not None else EMBED_CACHE_FILE
 
-    minimized = schema_records_to_minimized(records)
-    total = len(minimized)
+    print(f"\n[Step 2] Loading Item Master cache bundle (no live DB)...")
+    print(f"         Embeddings: {cache}")
+    print(f"         Row cache : {ITEM_MASTER_MINIMIZED_JSONL}")
+
+    mat, _meta, row_cache = load_item_master_main_db_cache(cache_path=cache)
+    total = len(row_cache)
     if total == 0:
         return {
             "total_records": 0,
@@ -146,40 +225,10 @@ def run_item_master_duplicate_engine(
             "duplicates": {},
         }
 
-    print(f"\n[Step 2] Loading embeddings from cache (force reuse if present)...")
-    print(f"         Model    : {model}")
-    print(f"         Cache    : {cache}")
-    print("         Cache mode: reuse-if-present (no recompute on duplicate engine)")
+    numerics = _cached_numerics(row_cache)
 
-    _write_minimized_json_before_embed(minimized, cache_path=cache)
-    _index, mat = build_faiss_index(
-        minimized,
-        model=model,
-        batch_size=batch,
-        cache_path=cache,
-        reuse_if_present=True,
-    )
-
-    n_aligned = min(int(mat.shape[0]), len(minimized))
-    if int(mat.shape[0]) != len(minimized):
-        logger.warning(
-            "Duplicate engine: cache/view row mismatch (cache_vectors=%s view_rows=%s). "
-            "Using aligned prefix of %s rows.",
-            int(mat.shape[0]),
-            len(minimized),
-            n_aligned,
-        )
-        print(
-            f"[Step 2] Cache/view row mismatch — using aligned prefix ({n_aligned} rows)"
-        )
-    mat = np.asarray(mat[:n_aligned], dtype=np.float32)
-    minimized = minimized[:n_aligned]
-    total = len(minimized)
-
-    print(f"[Step 2] FAISS index built — {mat.shape[0]} vectors of dim {mat.shape[1]}")
-    print("[Step 2] Searching for duplicate groups...")
-
-    numerics = [r.get("numeric") or "" for r in minimized]
+    print(f"[Step 2] Cache loaded — {mat.shape[0]} vectors of dim {mat.shape[1]}")
+    print("[Step 2] Searching for duplicate groups (cached embeddings + cached rows)...")
     groups = find_duplicate_groups_by_text_and_numeric(
         np.asarray(mat, dtype=np.float32),
         numerics,
@@ -197,21 +246,7 @@ def run_item_master_duplicate_engine(
         dup_id = f"DUP_{idx}"
         rows_out: list[dict[str, Any]] = []
         for m in members:
-            rec = minimized[m]
-            row_payload: dict[str, Any] = {
-                "row#": m + 1,
-                "ITEM_TYPE": clean_str(rec.get("_item_type", "")),
-                "MAINGROUP": clean_str(rec.get("_main_group", "")),
-                "SUBGROUP": clean_str(rec.get("_sub_group", "")),
-                "ITEMDESC": clean_str(rec.get("_item_description", "")),
-            }
-            if "_item_code" in rec:
-                row_payload["ITEM_CODE"] = clean_str(rec.get("_item_code", ""))
-            if "_uom" in rec:
-                row_payload["UOM"] = clean_str(rec.get("_uom", ""))
-            if "_doc_no" in rec:
-                row_payload["DocNo"] = clean_str(rec.get("_doc_no", ""))
-            rows_out.append(row_payload)
+            rows_out.append(_duplicate_row_payload(m, row_cache[m]))
         duplicates[dup_id] = {
             "status": _duplicate_group_column_status(rows_out),
             "records": rows_out,

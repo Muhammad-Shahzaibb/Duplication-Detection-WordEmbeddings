@@ -40,6 +40,10 @@ class ItemMasterUpdateEmbeddingsResponse(BaseModel):
     embedding_dim: int = Field(..., description="Vector dimension (0 if no rows).")
     cache_file: str = Field(default="", description="Absolute path to embeddings_cache.npy.")
     metadata_file: str = Field(default="", description="Absolute path to embeddings_cache.npy.meta.json.")
+    minimized_cache_file: str = Field(
+        default="",
+        description="Absolute path to final_rows.jsonl (text/numeric snapshot, index-aligned with cache).",
+    )
     model: str = Field(..., description="Sentence-transformers model id used for encoding.")
     text_digest: str = Field(
         default="",

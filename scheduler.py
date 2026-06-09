@@ -92,11 +92,19 @@ def _run_vendor_master_update_embeddings() -> dict[str, Any]:
 def _run_item_master_update_embeddings() -> dict[str, Any]:
     """Same logic as POST /Item-Master-update-embeddings."""
     logger.info("Scheduler: Item-Master-update-embeddings — start")
-    tuples = fetch_item_master_rows_from_view()
+    tuples = fetch_item_master_rows_from_view(include_item_code=True)
     logger.info("Scheduler: item view rows fetched: %s", len(tuples))
     records = [
-        row_to_schema_json(item_description=desc, item_type=it, main_group=mg, sub_group=sg)
-        for it, mg, sg, desc in tuples
+        row_to_schema_json(
+            item_description=desc,
+            item_type=it,
+            main_group=mg,
+            sub_group=sg,
+            item_code=code,
+            uom=uom,
+            doc_no=doc_no,
+        )
+        for it, mg, sg, desc, code, uom, doc_no in tuples
     ]
     payload = rebuild_item_master_embeddings_cache(records)
     logger.info(
