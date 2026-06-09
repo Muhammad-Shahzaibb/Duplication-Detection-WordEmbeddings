@@ -330,11 +330,20 @@ def build_faiss_index(
             logger.info("Embedding COMPUTE progress: %s/%s rows", end, total)
 
         mm.flush()
-        mat = mm
+        # Copy off memmap and close the file handle (required on Windows before rename/save).
+        mat = np.asarray(mm, dtype=np.float32).copy()
+        try:
+            mmap_obj = getattr(mm, "_mmap", None)
+            if mmap_obj is not None:
+                mmap_obj.close()
+        except Exception:
+            pass
+        del mm
 
-    dim = int(mat.shape[1])
+    dim = int(mat.shape[1]) if mat.size else 0
     index = faiss.IndexFlatIP(dim)  # IP = Inner Product (cosine on normalized vectors)
-    index.add(np.asarray(mat, dtype=np.float32))
+    if mat.size:
+        index.add(np.asarray(mat, dtype=np.float32))
 
     if cache_npy is not None:
         try:
@@ -345,7 +354,13 @@ def build_faiss_index(
             if cache_meta is not None:
                 cache_meta.write_text(
                     json.dumps(
-                        {"model": model, "rows": int(total), "dim": int(dim), "text_digest": digest},
+                        {
+                            "model": model,
+                            "rows": int(total),
+                            "dim": int(dim),
+                            "text_digest": digest,
+                            "status": "ready",
+                        },
                         ensure_ascii=False,
                         indent=2,
                     ),

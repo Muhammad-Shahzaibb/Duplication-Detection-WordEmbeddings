@@ -17,7 +17,7 @@ EMBED_CACHE_FILE: Path = CACHE_DIR / "embeddings_cache.npy"
 EMBED_VENDOR_CACHE_FILE: Path = CACHE_DIR / "vendor_embeddings_cache.npy"
 
 # Item Master row cache (text, numeric, display columns; index-aligned with embeddings_cache.npy).
-# Written only on /Item-Master-update-embeddings (or scheduler); read by duplicate engine + variant check.
+# Published atomically at the end of /Item-Master-update-embeddings (staging *.staging files during build).
 ITEM_MASTER_MINIMIZED_JSONL: Path = CACHE_DIR / "final_rows.jsonl"
 ITEM_MASTER_MINIMIZED_JSON: Path = CACHE_DIR / "final_rows.json"
 PG_HOST = os.environ.get("PGHOST", "163.61.91.149")

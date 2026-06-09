@@ -1,4 +1,6 @@
 import json
+import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +27,68 @@ from logging_setup import get_logger
 
 logger = get_logger("style_textile.engine")
 
+_item_master_cache_rebuild_lock = threading.Lock()
 
-def _write_minimized_json_before_embed(minimized: list[dict[str, Any]], *, cache_path: str | Path) -> tuple[Path, Path]:
-    jl, jp = ITEM_MASTER_MINIMIZED_JSONL, ITEM_MASTER_MINIMIZED_JSON
-    paths = write_minimized_embedding_input_json(minimized, jsonl_path=jl, json_path=jp)
-    logger.info("Wrote minimized JSON (pre-embed): %s | %s", paths[0], paths[1])
+
+def _staging_path(production: Path) -> Path:
+    """Sidecar staging path; production files are untouched until publish."""
+    return production.with_name(f"{production.stem}.staging{production.suffix}")
+
+
+def _embedding_meta_path(npy_path: Path) -> Path:
+    return npy_path.with_suffix(npy_path.suffix + ".meta.json")
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _publish_item_master_cache_bundle(
+    *,
+    embedding_matrix: np.ndarray,
+    staging_npy: Path,
+    staging_jsonl: Path,
+    staging_json: Path,
+    production_npy: Path,
+    production_jsonl: Path,
+    production_json: Path,
+) -> None:
+    """
+    Publish completed staging bundle to production paths.
+
+    Uses ``np.save`` / ``shutil.copy2`` instead of ``Path.replace`` so Windows
+    does not fail when the staging memmap file was recently closed.
+    """
+    production_npy.parent.mkdir(parents=True, exist_ok=True)
+    staging_meta = _embedding_meta_path(staging_npy)
+    production_meta = _embedding_meta_path(production_npy)
+
+    np.save(production_npy, np.asarray(embedding_matrix, dtype=np.float32))
+    shutil.copy2(staging_meta, production_meta)
+    shutil.copy2(staging_jsonl, production_jsonl)
+    shutil.copy2(staging_json, production_json)
+
+    for path in (staging_npy, staging_meta, staging_jsonl, staging_json):
+        _unlink_quiet(path)
+
+    logger.info(
+        "Item Master cache bundle published: %s | %s",
+        production_npy,
+        production_jsonl,
+    )
+
+
+def _write_minimized_json_before_embed(
+    minimized: list[dict[str, Any]],
+    *,
+    jsonl_path: Path,
+    json_path: Path,
+) -> tuple[Path, Path]:
+    paths = write_minimized_embedding_input_json(minimized, jsonl_path=jsonl_path, json_path=json_path)
+    logger.info("Wrote row cache (staging): %s | %s", paths[0], paths[1])
     return paths
 
 
@@ -157,43 +216,88 @@ def rebuild_item_master_embeddings_cache(
     cache_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """
-    Recompute embeddings from Item Master schema rows (same regex minimization as duplicate detection).
-    Ignores any existing cache and overwrites ``embeddings_cache.npy`` and ``*.meta.json``.
+    Recompute embeddings and publish the full cache bundle when **complete**.
+
+    While embedding runs, all reads keep using the previous production files
+    (``embeddings_cache.npy``, ``final_rows.jsonl``, etc.). New files are written
+    to ``*.staging`` paths and atomically swapped in only at the end.
     """
-    model = embed_model if embed_model is not None else EMBED_MODEL
-    batch = embed_batch if embed_batch is not None else EMBED_BATCH
-    cache = cache_path if cache_path is not None else EMBED_CACHE_FILE
-    minimized = schema_records_to_minimized(records)
-    total = len(minimized)
-    print(f"\n[Update embeddings] Refreshing cache for {total} rows...")
-    print(f"         Model    : {model}")
-    print(f"         Batch    : {batch}")
-    print(f"         Cache    : {cache}")
-    _write_minimized_json_before_embed(minimized, cache_path=cache)
-    _index, mat = build_faiss_index(
-        minimized,
-        model=model,
-        batch_size=batch,
-        cache_path=cache,
-        reuse_only=False,
-        force_recompute=True,
-    )
-    cache_p = Path(cache).resolve() if cache else None
-    meta_p = cache_p.with_suffix(cache_p.suffix + ".meta.json") if cache_p else None
-    meta: dict[str, Any] = {}
-    if meta_p is not None and meta_p.exists():
-        meta = json.loads(meta_p.read_text(encoding="utf-8"))
-    jl, _jp = ITEM_MASTER_MINIMIZED_JSONL, ITEM_MASTER_MINIMIZED_JSON
-    return {
-        "total_records": total,
-        "embedding_dim": int(mat.shape[1]) if mat.size else 0,
-        "cache_file": str(cache_p) if cache_p else "",
-        "metadata_file": str(meta_p) if meta_p else "",
-        "minimized_cache_file": str(jl.resolve()),
-        "model": model,
-        "text_digest": str(meta.get("text_digest", "")),
-        "rows_in_metadata": int(meta.get("rows", total)),
-    }
+    with _item_master_cache_rebuild_lock:
+        model = embed_model if embed_model is not None else EMBED_MODEL
+        batch = embed_batch if embed_batch is not None else EMBED_BATCH
+        production_npy = Path(cache_path if cache_path is not None else EMBED_CACHE_FILE)
+        production_jsonl = ITEM_MASTER_MINIMIZED_JSONL
+        production_json = ITEM_MASTER_MINIMIZED_JSON
+
+        staging_npy = _staging_path(production_npy)
+        staging_jsonl = _staging_path(production_jsonl)
+        staging_json = _staging_path(production_json)
+        for path in (
+            staging_npy,
+            _embedding_meta_path(staging_npy),
+            staging_jsonl,
+            staging_json,
+        ):
+            _unlink_quiet(path)
+
+        minimized = schema_records_to_minimized(records)
+        total = len(minimized)
+        print(f"\n[Update embeddings] Refreshing cache for {total} rows...")
+        print(f"         Model    : {model}")
+        print(f"         Batch    : {batch}")
+        print(f"         Staging  : {staging_npy}")
+        print("         Production cache unchanged until embedding completes.")
+
+        try:
+            _write_minimized_json_before_embed(
+                minimized,
+                jsonl_path=staging_jsonl,
+                json_path=staging_json,
+            )
+            _index, mat = build_faiss_index(
+                minimized,
+                model=model,
+                batch_size=batch,
+                cache_path=staging_npy,
+                reuse_only=False,
+                force_recompute=True,
+            )
+            del _index
+            _publish_item_master_cache_bundle(
+                embedding_matrix=mat,
+                staging_npy=staging_npy,
+                staging_jsonl=staging_jsonl,
+                staging_json=staging_json,
+                production_npy=production_npy,
+                production_jsonl=production_jsonl,
+                production_json=production_json,
+            )
+            print(f"[Update embeddings] Published production cache: {production_npy}")
+        except Exception:
+            for path in (
+                staging_npy,
+                _embedding_meta_path(staging_npy),
+                staging_jsonl,
+                staging_json,
+            ):
+                _unlink_quiet(path)
+            raise
+
+        cache_p = production_npy.resolve()
+        meta_p = _embedding_meta_path(cache_p)
+        meta: dict[str, Any] = {}
+        if meta_p.exists():
+            meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        return {
+            "total_records": total,
+            "embedding_dim": int(mat.shape[1]) if mat.size else 0,
+            "cache_file": str(cache_p),
+            "metadata_file": str(meta_p),
+            "minimized_cache_file": str(production_jsonl.resolve()),
+            "model": model,
+            "text_digest": str(meta.get("text_digest", "")),
+            "rows_in_metadata": int(meta.get("rows", total)),
+        }
 
 
 def run_item_master_duplicate_engine(
