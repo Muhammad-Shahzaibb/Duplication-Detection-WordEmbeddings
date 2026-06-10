@@ -379,8 +379,8 @@ def row_to_schema_json(
         out["_item_code"] = clean_str(item_code)
     if uom is not None:
         out["_uom"] = clean_str(uom)
-    if supplier is not None:
-        out["_supplier"] = clean_str(supplier)
+    if item_code is not None or uom is not None:
+        out["_supplier"] = clean_str(supplier) if supplier is not None else ""
     if doc_no is not None:
         out["_doc_no"] = clean_str(doc_no)
     return out
@@ -472,10 +472,10 @@ def minimized_row_to_cache_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
     if "_item_code" in row:
         out["ITEM_CODE"] = clean_str(row.get("_item_code", ""))
-    if "_uom" in row:
         out["UOM"] = clean_str(row.get("_uom", ""))
-    if "_supplier" in row:
         out["Supplier"] = clean_str(row.get("_supplier", ""))
+    elif "_uom" in row:
+        out["UOM"] = clean_str(row.get("_uom", ""))
     if "_doc_no" in row:
         out["DocNo"] = clean_str(row.get("_doc_no", ""))
     return out
@@ -519,10 +519,10 @@ def schema_records_to_minimized(records: list[dict[str, str]]) -> list[dict[str,
         }
         if "_item_code" in rec:
             out_rec["_item_code"] = rec.get("_item_code", "")
-        if "_uom" in rec:
             out_rec["_uom"] = rec.get("_uom", "")
-        if "_supplier" in rec:
             out_rec["_supplier"] = rec.get("_supplier", "")
+        elif "_uom" in rec:
+            out_rec["_uom"] = rec.get("_uom", "")
         if "_doc_no" in rec:
             out_rec["_doc_no"] = rec.get("_doc_no", "")
         minimized.append(out_rec)
