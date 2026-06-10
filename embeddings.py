@@ -20,8 +20,12 @@ from Config import EMBED_CACHE_FILE as _DEFAULT_EMBED_CACHE_PATH
 #  EMBEDDINGS CONFIG — SentenceTransformers + FAISS
 # ─────────────────────────────────────────────
 
-EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # HuggingFace model id (downloads once)
+# EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # HuggingFace model id (downloads once)
+# EMBED_BATCH = 256  # encoding batch size (CPU)
+
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L12-v2" # HuggingFace model id (downloads once)
 EMBED_BATCH = 256  # encoding batch size (CPU)
+
 
 # Default cache lives next to the deployed app (Config.py path).
 EMBED_CACHE_FILE = str(_DEFAULT_EMBED_CACHE_PATH)

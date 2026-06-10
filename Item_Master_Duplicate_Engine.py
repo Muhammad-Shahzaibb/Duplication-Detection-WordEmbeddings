@@ -165,6 +165,8 @@ def _duplicate_row_payload(index: int, row: dict[str, Any]) -> dict[str, Any]:
         payload["ITEM_CODE"] = clean_str(row.get("ITEM_CODE", ""))
     if "UOM" in row:
         payload["UOM"] = clean_str(row.get("UOM", ""))
+    if "Supplier" in row:
+        payload["Supplier"] = clean_str(row.get("Supplier", ""))
     if "DocNo" in row:
         payload["DocNo"] = clean_str(row.get("DocNo", ""))
     return payload

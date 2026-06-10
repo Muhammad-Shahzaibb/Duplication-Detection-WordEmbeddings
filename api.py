@@ -35,6 +35,7 @@ from Item_Master_Duplicate_Engine import (
     row_to_schema_json,
     run_item_master_duplicate_engine,
 )
+from item_spell import correct_itemdesc_spelling
 from embeddings import (
     EMBED_CACHE_FILE,
     EMBED_MODEL,
@@ -198,9 +199,9 @@ def item_master_update_embeddings() -> ItemMasterUpdateEmbeddingsResponse:
             sub_group=sg,
             item_code=code,
             uom=uom,
-            doc_no=doc_no,
+            supplier=supplier,
         )
-        for it, mg, sg, desc, code, uom, doc_no in tuples
+        for it, mg, sg, desc, code, uom, supplier in tuples
     ]
     payload = rebuild_item_master_embeddings_cache(records)
     logger.info(
@@ -223,7 +224,15 @@ def item_master_check_duplicate_variant(
 ) -> ItemMasterVariantDuplicateCheckResponse:
     logger.info("POST /Item-Master-check-duplicate-variant — start | ITEMDESC=%r", req.ITEMDESC)
 
-    candidate_schema = row_to_schema_json(item_description=req.ITEMDESC)
+    spell_corrected = correct_itemdesc_spelling(req.ITEMDESC)
+    if spell_corrected != clean_str(req.ITEMDESC):
+        logger.info(
+            "Variant check spell correction: %r -> %r",
+            req.ITEMDESC,
+            spell_corrected,
+        )
+
+    candidate_schema = row_to_schema_json(item_description=spell_corrected)
     candidate_min = schema_records_to_minimized([candidate_schema])[0]
     candidate_text = build_embedding_text(candidate_min)
     cand_numeric = candidate_min.get("numeric") or ""

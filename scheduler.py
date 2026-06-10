@@ -102,9 +102,9 @@ def _run_item_master_update_embeddings() -> dict[str, Any]:
             sub_group=sg,
             item_code=code,
             uom=uom,
-            doc_no=doc_no,
+            supplier=supplier,
         )
-        for it, mg, sg, desc, code, uom, doc_no in tuples
+        for it, mg, sg, desc, code, uom, supplier in tuples
     ]
     payload = rebuild_item_master_embeddings_cache(records)
     logger.info(
