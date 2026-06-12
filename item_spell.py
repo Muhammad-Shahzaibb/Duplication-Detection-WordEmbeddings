@@ -19,7 +19,30 @@ logger = get_logger("style_textile.spell")
 
 _DOMAIN_TOKENS: frozenset[str] = frozenset(MATERIALS | COLORS | DIM_LABELS)
 
+_uom_skip_tokens: frozenset[str] | None = None
+
 _sym_spell: SymSpell | None = None
+
+
+def _token_lookup_key(tok: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", tok.casefold())
+
+
+def _get_uom_skip_tokens() -> frozenset[str]:
+    """Known UOM labels/abbreviations — never SymSpell-correct these tokens."""
+    global _uom_skip_tokens
+    if _uom_skip_tokens is None:
+        from uom_synonyms import ALIAS_TO_CANONICAL, UOM_CANONICAL_GROUPS
+
+        keys: set[str] = set(ALIAS_TO_CANONICAL.keys())
+        for canonical, labels in UOM_CANONICAL_GROUPS.items():
+            keys.add(_token_lookup_key(canonical))
+            for label in labels:
+                keys.add(_token_lookup_key(label))
+                for part in label.split():
+                    keys.add(_token_lookup_key(part))
+        _uom_skip_tokens = frozenset(keys)
+    return _uom_skip_tokens
 
 
 def _get_sym_spell() -> SymSpell:
@@ -75,6 +98,9 @@ def correct_itemdesc_spelling(desc: str) -> str:
         if not lookup or lookup in _DOMAIN_TOKENS:
             corrected.append(t)
             continue
+        if _token_lookup_key(t) in _get_uom_skip_tokens():
+            corrected.append(t)
+            continue
         if len(lookup) <= 2:
             corrected.append(t)
             continue
@@ -86,3 +112,18 @@ def correct_itemdesc_spelling(desc: str) -> str:
             corrected.append(t)
 
     return " ".join(corrected)
+
+
+def preprocess_variant_text(text: str) -> str:
+    """
+    Variant-check pipeline: spell-correct then normalize (spaces, punctuation, hyphens).
+
+    Used for Item Master ITEMDESC and catalog variant APIs (main code, sub code, UOM).
+    """
+    from jsonify import normalize_item_description
+
+    s = clean_str(text)
+    if not s:
+        return s
+    s = correct_itemdesc_spelling(s)
+    return normalize_item_description(s)

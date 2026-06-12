@@ -35,7 +35,7 @@ from Item_Master_Duplicate_Engine import (
     row_to_schema_json,
     run_item_master_duplicate_engine,
 )
-from item_spell import correct_itemdesc_spelling
+from item_spell import preprocess_variant_text
 from embeddings import (
     EMBED_CACHE_FILE,
     EMBED_MODEL,
@@ -111,7 +111,7 @@ app = FastAPI(
     openapi_tags=[
         {"name": "ITEM MASTER APIS", "description": "Item Master data and duplicate detection."},
         {"name": "VENDOR MASTER APIS", "description": "Vendor Master duplicate detection and variant checks."},
-        {"name": "CATALOG APIS", "description": "Main code, sub code, and UOM variant duplicate checks (runtime embeddings)."},
+        {"name": "CATALOG APIS", "description": "Main code, sub code, and UOM variant checks (spell + normalize, then synonym/embed match)."},
     ],
 )
 
@@ -224,15 +224,15 @@ def item_master_check_duplicate_variant(
 ) -> ItemMasterVariantDuplicateCheckResponse:
     logger.info("POST /Item-Master-check-duplicate-variant — start | ITEMDESC=%r", req.ITEMDESC)
 
-    spell_corrected = correct_itemdesc_spelling(req.ITEMDESC)
-    if spell_corrected != clean_str(req.ITEMDESC):
+    prepared_desc = preprocess_variant_text(req.ITEMDESC)
+    if prepared_desc != clean_str(req.ITEMDESC):
         logger.info(
-            "Variant check spell correction: %r -> %r",
+            "Variant check preprocessing: %r -> %r",
             req.ITEMDESC,
-            spell_corrected,
+            prepared_desc,
         )
 
-    candidate_schema = row_to_schema_json(item_description=spell_corrected)
+    candidate_schema = row_to_schema_json(item_description=prepared_desc)
     candidate_min = schema_records_to_minimized([candidate_schema])[0]
     candidate_text = build_embedding_text(candidate_min)
     cand_numeric = candidate_min.get("numeric") or ""
@@ -668,7 +668,7 @@ def _catalog_variant_response(
 @app.post(
     "/Main-Code-check-duplicate-variant",
     response_model=MainCodeVariantDuplicateCheckResponse,
-    summary="Check if a candidate main code name is a duplicate (runtime embeddings)",
+    summary="Check if a candidate main code name is a duplicate (spell + normalize + embeddings)",
     tags=["CATALOG APIS"],
 )
 def main_code_check_duplicate_variant(
@@ -690,7 +690,7 @@ def main_code_check_duplicate_variant(
 @app.post(
     "/Sub-Code-check-duplicate-variant",
     response_model=SubCodeVariantDuplicateCheckResponse,
-    summary="Check if a candidate sub code name is a duplicate (runtime embeddings)",
+    summary="Check if a candidate sub code name is a duplicate (spell + normalize + embeddings)",
     tags=["CATALOG APIS"],
 )
 def sub_code_check_duplicate_variant(
@@ -712,7 +712,7 @@ def sub_code_check_duplicate_variant(
 @app.post(
     "/UOM-check-duplicate-variant",
     response_model=UOMVariantDuplicateCheckResponse,
-    summary="Check UOM duplicate: synonym dictionary first, then runtime embeddings",
+    summary="Check UOM duplicate: spell + normalize, synonym dictionary, then embeddings",
     tags=["CATALOG APIS"],
 )
 def uom_check_duplicate_variant(

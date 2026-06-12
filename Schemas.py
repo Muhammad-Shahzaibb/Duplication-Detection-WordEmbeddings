@@ -253,7 +253,10 @@ class VendorIBANVariantCheckRequest(BaseModel):
 
 
 class MainCodeVariantCheckRequest(BaseModel):
-    MainCodeName: str = Field(..., description="Candidate main code name (maps to ItemMainCode_Name).")
+    MainCodeName: str = Field(
+        ...,
+        description="Candidate main code name (spell-corrected and normalized before embedding match).",
+    )
 
 
 class MainCodeVariantMatch(BaseModel):
@@ -269,7 +272,10 @@ class MainCodeVariantDuplicateCheckResponse(BaseModel):
 
 
 class SubCodeVariantCheckRequest(BaseModel):
-    SubCodeName: str = Field(..., description="Candidate sub code name (maps to ItemSubCode_Name).")
+    SubCodeName: str = Field(
+        ...,
+        description="Candidate sub code name (spell-corrected and normalized before embedding match).",
+    )
 
 
 class SubCodeVariantMatch(BaseModel):
@@ -285,7 +291,10 @@ class SubCodeVariantDuplicateCheckResponse(BaseModel):
 
 
 class UOMVariantCheckRequest(BaseModel):
-    UOMDescription: str = Field(..., description="Candidate UOM description (maps to UOM_Description).")
+    UOMDescription: str = Field(
+        ...,
+        description="Candidate UOM (spell-corrected, normalized, synonym lookup, then embedding match).",
+    )
 
 
 class UOMVariantMatch(BaseModel):
