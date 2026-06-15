@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from catalog_fuzzy import find_fuzzy_catalog_matches
 from Config import CATALOG_COL_ID, UOM_COL, UOM_VIEW
 from Db_View import fetch_catalog_text_view_rows
 from embeddings import EMBED_MODEL, embed_texts_local
@@ -62,9 +63,13 @@ def check_catalog_text_variant(
     match_value_key: str,
     threshold: float,
     col_id: str | None = None,
+    fuzzy_fallback: bool = False,
 ) -> dict[str, Any]:
     """
     Embed candidate + all view rows at runtime; return duplicate/unique + matches.
+
+    When ``fuzzy_fallback=True`` (Main/Sub code APIs), a token-aligned Levenshtein
+    pass (max 2 edits per token) runs only if embedding similarity finds no match.
 
     Each match uses the view ``id`` as row# (ORDER BY id). No embeddings are cached.
     """
@@ -107,6 +112,22 @@ def check_catalog_text_variant(
                 match_value_key: texts[i],
                 "row": row_ids[i],
             })
+
+    if not matches and fuzzy_fallback:
+        fuzzy_matches = find_fuzzy_catalog_matches(
+            cand,
+            embed_texts,
+            raw_texts=texts,
+            row_ids=row_ids,
+            match_value_key=match_value_key,
+        )
+        if fuzzy_matches:
+            logger.info(
+                "Catalog variant fuzzy fallback view=%s — duplicate | matches=%s",
+                view,
+                len(fuzzy_matches),
+            )
+            return {"status": "duplicate", "matches": fuzzy_matches}
 
     status = "duplicate" if matches else "unique"
     logger.info("Catalog variant check view=%s — status=%s matches=%s", view, status, len(matches))

@@ -710,7 +710,7 @@ def _catalog_variant_response(
 @app.post(
     "/Main-Code-check-duplicate-variant",
     response_model=MainCodeVariantDuplicateCheckResponse,
-    summary="Check if a candidate main code name is a duplicate (spell + normalize + embeddings)",
+    summary="Check if a candidate main code name is a duplicate (spell + normalize + embeddings + fuzzy fallback)",
     tags=["CATALOG APIS"],
 )
 def main_code_check_duplicate_variant(
@@ -729,6 +729,7 @@ def main_code_check_duplicate_variant(
         col_text=ITEM_MAIN_CODE_COL,
         match_value_key="MainCodeName",
         threshold=text_threshold,
+        fuzzy_fallback=True,
     )
     return _catalog_variant_response(
         payload, match_cls=MainCodeVariantMatch, response_cls=MainCodeVariantDuplicateCheckResponse
@@ -738,7 +739,7 @@ def main_code_check_duplicate_variant(
 @app.post(
     "/Sub-Code-check-duplicate-variant",
     response_model=SubCodeVariantDuplicateCheckResponse,
-    summary="Check if a candidate sub code name is a duplicate (spell + normalize + embeddings)",
+    summary="Check if a candidate sub code name is a duplicate (spell + normalize + embeddings + fuzzy fallback)",
     tags=["CATALOG APIS"],
 )
 def sub_code_check_duplicate_variant(
@@ -757,6 +758,7 @@ def sub_code_check_duplicate_variant(
         col_text=ITEM_SUB_CODE_COL,
         match_value_key="SubCodeName",
         threshold=text_threshold,
+        fuzzy_fallback=True,
     )
     return _catalog_variant_response(
         payload, match_cls=SubCodeVariantMatch, response_cls=SubCodeVariantDuplicateCheckResponse
