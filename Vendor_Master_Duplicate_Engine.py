@@ -3,7 +3,7 @@ Vendor Master duplicate detection engine.
 
 Six fields are checked **independently** (no combination logic):
 
-  - Name       : embedding cosine similarity >= VENDOR_NAME_TEXT_THRESHOLD
+  - Name       : embedding cosine similarity (threshold from API query param)
   - CNIC       : normalized exact match (strip specials/spaces, strip leading zeros)
   - NTN        : normalized exact match
   - STRN       : normalized exact match
@@ -30,11 +30,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from Config import (
-    EMBED_VENDOR_CACHE_FILE,
-    VENDOR_NAME_TEXT_THRESHOLD,
-    VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
-)
+from Config import EMBED_VENDOR_CACHE_FILE
 from embeddings import (
     EMBED_BATCH,
     EMBED_MODEL,
@@ -186,7 +182,7 @@ def _embed_vendor_names(
 def find_name_duplicate_groups(
     mat: np.ndarray,
     *,
-    text_threshold: float = VENDOR_NAME_TEXT_THRESHOLD,
+    text_threshold: float,
 ) -> list[list[int]]:
     """
     Group vendor name indices where pairwise cosine similarity >= text_threshold.
@@ -322,7 +318,7 @@ def match_vendor_name_variant(
     approval_rows: list[tuple[Any, ...]],
     ap_mat: np.ndarray,
     *,
-    threshold: float = VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
+    threshold: float,
 ) -> list[dict[str, Any]]:
     """
     Check a candidate vendor Name against main DB (cached) and approval (runtime) embeddings.
@@ -434,7 +430,7 @@ def run_vendor_master_duplicate_engine(
     embed_model: str | None = None,
     embed_batch: int | None = None,
     cache_path: str | Path | None = None,
-    name_threshold: float | None = None,
+    name_threshold: float,
 ) -> dict[str, Any]:
     """
     Run the full vendor master duplicate detection pipeline.
@@ -446,7 +442,7 @@ def run_vendor_master_duplicate_engine(
     model = embed_model or EMBED_MODEL
     batch = embed_batch or EMBED_BATCH
     cache = Path(cache_path) if cache_path else Path(EMBED_VENDOR_CACHE_FILE)
-    threshold = name_threshold if name_threshold is not None else VENDOR_NAME_TEXT_THRESHOLD
+    threshold = name_threshold
 
     total = len(rows)
     logger.info("Vendor duplicate engine: %s rows | name_threshold=%.3f", total, threshold)

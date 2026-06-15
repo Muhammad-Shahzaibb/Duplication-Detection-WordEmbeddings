@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 
 from Config import (
-    DUPLICATE_ENGINE_TEXT_THRESHOLD,
     ITEM_MASTER_MINIMIZED_JSON,
     ITEM_MASTER_MINIMIZED_JSONL,
 )
@@ -305,6 +304,7 @@ def rebuild_item_master_embeddings_cache(
 def run_item_master_duplicate_engine(
     *,
     cache_path: str | Path | None = None,
+    text_threshold: float,
 ) -> dict[str, Any]:
     """
     Duplicate detection on the main DB using the on-disk cache bundle only.
@@ -338,9 +338,9 @@ def run_item_master_duplicate_engine(
     groups = find_duplicate_groups_by_text_and_numeric(
         np.asarray(mat, dtype=np.float32),
         numerics,
-        text_threshold=DUPLICATE_ENGINE_TEXT_THRESHOLD,
+        text_threshold=text_threshold,
     )
-    print(f"[Step 2] Found {len(groups)} duplicate group(s) (text_threshold={DUPLICATE_ENGINE_TEXT_THRESHOLD})")
+    print(f"[Step 2] Found {len(groups)} duplicate group(s) (text_threshold={text_threshold})")
 
     duplicate_record_count = sum(max(0, len(g) - 1) for g in groups)
     valid_records = total - duplicate_record_count

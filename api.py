@@ -7,21 +7,15 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from Catalog_Variant_Engine import check_catalog_text_variant, check_uom_variant
 from Config import (
-    DUPLICATE_ENGINE_TEXT_THRESHOLD,
     ITEM_MAIN_CODE_COL,
     ITEM_MAIN_CODE_VIEW,
     ITEM_SUB_CODE_COL,
     ITEM_SUB_CODE_VIEW,
-    MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
-    SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
-    UOM_VARIANT_CHECK_TEXT_THRESHOLD,
-    VARIANT_CHECK_TEXT_THRESHOLD,
-    VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
 )
 from Db_View import (
     fetch_item_master_rows_from_view,
@@ -93,6 +87,24 @@ from Vendor_Master_Duplicate_Engine import (
 
 setup_logging()
 logger = get_logger("style_textile.api")
+
+THRESHOLD_QUERY_MIN = 50
+THRESHOLD_QUERY_MAX = 100
+
+ThresholdQuery = Query(
+    ...,
+    ge=THRESHOLD_QUERY_MIN,
+    le=THRESHOLD_QUERY_MAX,
+    description=(
+        "Required cosine similarity threshold as a percentage (50–100). "
+        "Converted to 0.50–1.00 internally (e.g. 98 → 0.98)."
+    ),
+)
+
+
+def query_threshold_to_cosine(threshold_pct: int) -> float:
+    """Map frontend percent (50–100) to cosine threshold (0.50–1.00)."""
+    return threshold_pct / 100.0
 
 
 @asynccontextmanager
@@ -169,9 +181,15 @@ def _threshold_variant_matches(
     summary="Run duplicate detection on Item Master view",
     tags=["ITEM MASTER APIS"],
 )
-def item_master_duplicate_engine() -> ItemMasterDuplicateEngineResponse:
-    logger.info("POST /Item-Master-duplicate-engine — start (cache bundle only, no live DB)")
-    payload = run_item_master_duplicate_engine()
+def item_master_duplicate_engine(
+    threshold: int = ThresholdQuery,
+) -> ItemMasterDuplicateEngineResponse:
+    text_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /Item-Master-duplicate-engine — start (cache bundle only, threshold=%.2f)",
+        text_threshold,
+    )
+    payload = run_item_master_duplicate_engine(text_threshold=text_threshold)
     logger.info(
         "POST /Item-Master-duplicate-engine — done | total=%s duplicate_records=%s groups=%s",
         payload.get("total_records"),
@@ -221,8 +239,14 @@ def item_master_update_embeddings() -> ItemMasterUpdateEmbeddingsResponse:
 )
 def item_master_check_duplicate_variant(
     req: ItemMasterVariantDuplicateCheckRequest,
+    threshold: int = ThresholdQuery,
 ) -> ItemMasterVariantDuplicateCheckResponse:
-    logger.info("POST /Item-Master-check-duplicate-variant — start | ITEMDESC=%r", req.ITEMDESC)
+    text_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /Item-Master-check-duplicate-variant — start | ITEMDESC=%r threshold=%.2f",
+        req.ITEMDESC,
+        text_threshold,
+    )
 
     prepared_desc = preprocess_variant_text(req.ITEMDESC)
     if prepared_desc != clean_str(req.ITEMDESC):
@@ -270,12 +294,12 @@ def item_master_check_duplicate_variant(
     db_matches = _threshold_variant_matches(
         mat_main, main_itemdescs, main_numerics, cand_vec, cand_numeric,
         location="db",
-        text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
+        text_threshold=text_threshold,
     )
     matches.extend(db_matches)
     logger.info(
         "DB embeddings: matches=%s (text_threshold=%.2f, cand_numeric=%r)",
-        len(db_matches), VARIANT_CHECK_TEXT_THRESHOLD, cand_numeric,
+        len(db_matches), text_threshold, cand_numeric,
     )
 
     # --- Approval embeddings (runtime only; never cached) ---
@@ -291,14 +315,14 @@ def item_master_check_duplicate_variant(
         ap_matches = _threshold_variant_matches(
             mat_ap, approval_itemdescs, approval_numerics, cand_vec, cand_numeric,
             location="approval",
-            text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
+            text_threshold=text_threshold,
         )
         matches.extend(ap_matches)
         logger.info(
             "Approval embeddings (runtime): rows=%s matches=%s (text_threshold=%.2f, cand_numeric=%r)",
             len(approval_tuples),
             len(ap_matches),
-            VARIANT_CHECK_TEXT_THRESHOLD,
+            text_threshold,
             cand_numeric,
         )
     else:
@@ -325,6 +349,7 @@ def item_master_check_duplicate_variant(
 )
 def item_master_check_duplicate_bulk(
     req: ItemMasterBulkDuplicateCheckRequest,
+    threshold: int = ThresholdQuery,
 ) -> ItemMasterBulkDuplicateCheckResponse:
     """
     Two-step bulk duplicate check:
@@ -334,9 +359,14 @@ def item_master_check_duplicate_bulk(
     2. For each unique representative, check against the **main DB** embeddings (cache reuse only)
        and **approval** embeddings (computed once per request from the approval view, not cached).
     """
+    text_threshold = query_threshold_to_cosine(threshold)
     submitted = req.ITEMDESC
     total_submitted = len(submitted)
-    logger.info("POST /Item-Master-check-duplicate-bulk — start | submitted=%s", total_submitted)
+    logger.info(
+        "POST /Item-Master-check-duplicate-bulk — start | submitted=%s threshold=%.2f",
+        total_submitted,
+        text_threshold,
+    )
 
     # ── Step 1: embed the entire bulk in real-time (no cache) ──────────────────
     bulk_schema = [row_to_schema_json(item_description=d) for d in submitted]
@@ -351,10 +381,10 @@ def item_master_check_duplicate_bulk(
     bulk_numerics = [r.get("numeric") or "" for r in bulk_min]
     logger.info(
         "Bulk intra-batch: using text_threshold=%.2f + exact numeric match",
-        DUPLICATE_ENGINE_TEXT_THRESHOLD,
+        text_threshold,
     )
     intra_groups_raw = find_duplicate_groups_by_text_and_numeric(
-        bulk_mat, bulk_numerics, text_threshold=DUPLICATE_ENGINE_TEXT_THRESHOLD
+        bulk_mat, bulk_numerics, text_threshold=text_threshold
     )
 
     # Track which submitted indices are "extra" duplicates (not the representative)
@@ -422,7 +452,7 @@ def item_master_check_duplicate_bulk(
     )
     logger.info(
         "Bulk checks: DB uses full cache bundle; approval uses live view | text_threshold=%.2f",
-        VARIANT_CHECK_TEXT_THRESHOLD,
+        text_threshold,
     )
 
     # ── Step 2: check each unique description ─────────────────────────────────
@@ -435,14 +465,14 @@ def item_master_check_duplicate_bulk(
         matches: list[VariantDuplicateMatch] = _threshold_variant_matches(
             mat_main, main_itemdescs, main_row_numerics, cand_vec, cand_numeric,
             location="db",
-            text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
+            text_threshold=text_threshold,
         )
         if approval_tuples:
             matches.extend(
                 _threshold_variant_matches(
                     mat_ap, approval_itemdescs, approval_row_numerics, cand_vec, cand_numeric,
                     location="approval",
-                    text_threshold=VARIANT_CHECK_TEXT_THRESHOLD,
+                    text_threshold=text_threshold,
                 )
             )
 
@@ -475,11 +505,13 @@ def item_master_check_duplicate_bulk(
     summary="Run duplicate detection on Vendor Master view (6 fields checked independently)",
     tags=["VENDOR MASTER APIS"],
 )
-def vendor_master_duplicate_engine() -> VendorMasterDuplicateEngineResponse:
+def vendor_master_duplicate_engine(
+    threshold: int = ThresholdQuery,
+) -> VendorMasterDuplicateEngineResponse:
     """
     Fetches all rows from the Vendor Master view and checks 6 fields independently:
 
-    - **Name**       — embedding cosine similarity (VENDOR_NAME_TEXT_THRESHOLD)
+    - **Name**       — embedding cosine similarity (``threshold`` query param, percent 50–100)
     - **CNIC**       — normalized exact match (strip special chars + leading zeros)
     - **NTN**        — normalized exact match
     - **STRN**       — normalized exact match
@@ -488,10 +520,14 @@ def vendor_master_duplicate_engine() -> VendorMasterDuplicateEngineResponse:
 
     Each field result lists its own duplicate groups with row#, id, Name, and the field value.
     """
-    logger.info("POST /Vendor-Master-duplicate-engine — start")
+    name_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /Vendor-Master-duplicate-engine — start (name_threshold=%.2f)",
+        name_threshold,
+    )
     rows = fetch_vendor_master_rows_from_view()
     logger.info("Vendor view rows fetched: %s", len(rows))
-    payload = run_vendor_master_duplicate_engine(rows)
+    payload = run_vendor_master_duplicate_engine(rows, name_threshold=name_threshold)
     logger.info(
         "POST /Vendor-Master-duplicate-engine — done | total=%s "
         "NAME_groups=%s CNIC_groups=%s NTN_groups=%s STRN_groups=%s ACCT_groups=%s IBAN_groups=%s",
@@ -624,8 +660,14 @@ def vendor_master_check_duplicate_iban(
 )
 def vendor_master_check_duplicate_name(
     req: VendorNameVariantCheckRequest,
+    threshold: int = ThresholdQuery,
 ) -> VendorVariantDuplicateCheckResponse:
-    logger.info("POST /Vendor-Master-check-duplicate-Name — start | Name=%r", req.Name)
+    name_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /Vendor-Master-check-duplicate-Name — start | Name=%r threshold=%.2f",
+        req.Name,
+        name_threshold,
+    )
 
     # Main DB: load cached embeddings, reuse regardless of row-count mismatch
     db_mat, db_rows = load_vendor_main_embeddings_reuse_if_present()
@@ -641,13 +683,13 @@ def vendor_master_check_duplicate_name(
         db_mat,
         approval_rows,
         ap_mat,
-        threshold=VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
+        threshold=name_threshold,
     )
     matches = [VendorVariantMatch.model_validate(m) for m in raw_matches]
     status = "duplicate" if matches else "unique"
     logger.info(
         "POST /Vendor-Master-check-duplicate-Name — done | threshold=%.3f status=%s matches=%s (db=%s approval=%s)",
-        VENDOR_VARIANT_CHECK_NAME_THRESHOLD,
+        name_threshold,
         status, len(matches),
         sum(1 for m in matches if m.location == "db"),
         sum(1 for m in matches if m.location == "approval"),
@@ -673,14 +715,20 @@ def _catalog_variant_response(
 )
 def main_code_check_duplicate_variant(
     req: MainCodeVariantCheckRequest,
+    threshold: int = ThresholdQuery,
 ) -> MainCodeVariantDuplicateCheckResponse:
-    logger.info("POST /Main-Code-check-duplicate-variant — start | MainCodeName=%r", req.MainCodeName)
+    text_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /Main-Code-check-duplicate-variant — start | MainCodeName=%r threshold=%.2f",
+        req.MainCodeName,
+        text_threshold,
+    )
     payload = check_catalog_text_variant(
         req.MainCodeName,
         view=ITEM_MAIN_CODE_VIEW,
         col_text=ITEM_MAIN_CODE_COL,
         match_value_key="MainCodeName",
-        threshold=MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
+        threshold=text_threshold,
     )
     return _catalog_variant_response(
         payload, match_cls=MainCodeVariantMatch, response_cls=MainCodeVariantDuplicateCheckResponse
@@ -695,14 +743,20 @@ def main_code_check_duplicate_variant(
 )
 def sub_code_check_duplicate_variant(
     req: SubCodeVariantCheckRequest,
+    threshold: int = ThresholdQuery,
 ) -> SubCodeVariantDuplicateCheckResponse:
-    logger.info("POST /Sub-Code-check-duplicate-variant — start | SubCodeName=%r", req.SubCodeName)
+    text_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /Sub-Code-check-duplicate-variant — start | SubCodeName=%r threshold=%.2f",
+        req.SubCodeName,
+        text_threshold,
+    )
     payload = check_catalog_text_variant(
         req.SubCodeName,
         view=ITEM_SUB_CODE_VIEW,
         col_text=ITEM_SUB_CODE_COL,
         match_value_key="SubCodeName",
-        threshold=SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD,
+        threshold=text_threshold,
     )
     return _catalog_variant_response(
         payload, match_cls=SubCodeVariantMatch, response_cls=SubCodeVariantDuplicateCheckResponse
@@ -717,12 +771,18 @@ def sub_code_check_duplicate_variant(
 )
 def uom_check_duplicate_variant(
     req: UOMVariantCheckRequest,
+    threshold: int = ThresholdQuery,
 ) -> UOMVariantDuplicateCheckResponse:
-    logger.info("POST /UOM-check-duplicate-variant — start | UOMDescription=%r", req.UOMDescription)
+    text_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /UOM-check-duplicate-variant — start | UOMDescription=%r threshold=%.2f",
+        req.UOMDescription,
+        text_threshold,
+    )
     payload = check_uom_variant(
         req.UOMDescription,
         match_value_key="UOMDescription",
-        threshold=UOM_VARIANT_CHECK_TEXT_THRESHOLD,
+        threshold=text_threshold,
     )
     return _catalog_variant_response(
         payload, match_cls=UOMVariantMatch, response_cls=UOMVariantDuplicateCheckResponse

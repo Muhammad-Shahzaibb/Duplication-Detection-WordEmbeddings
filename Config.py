@@ -40,13 +40,6 @@ VENDOR_MASTER_APPROVAL_VIEW = os.environ.get("VENDOR_MASTER_APPROVAL_VIEW", "vw_
 # ORDER BY for Vendor Master view (defaults to "id" for stable cache alignment)
 VENDOR_MASTER_ORDER_BY = os.environ.get("VENDOR_MASTER_ORDER_BY", "").strip()
 
-# VENDOR_NAME_TEXT_THRESHOLD — used by /Vendor-Master-duplicate-engine (cleansing engine).
-# VENDOR_VARIANT_CHECK_NAME_THRESHOLD — used by /Vendor-Master-check-duplicate-Name only.
-VENDOR_NAME_TEXT_THRESHOLD = float(os.environ.get("VENDOR_NAME_TEXT_THRESHOLD", "0.90"))
-VENDOR_VARIANT_CHECK_NAME_THRESHOLD = float(
-    os.environ.get("VENDOR_VARIANT_CHECK_NAME_THRESHOLD", "0.97")
-)
-
 # Approval Item Master view (override via ITEM_MASTER_APPROVAL_VIEW)
 ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", "vw_item_master_items")
 
@@ -54,18 +47,6 @@ ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", "vw_item
 # If empty, Db_View builds: ITEM_TYPE, MAINGROUP, SUBGROUP, ITEMDESC NULLS LAST.
 # Override if your view has a stable id, e.g.: ITEM_MASTER_ORDER_BY='"ITEM_ID" NULLS LAST'
 ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", "").strip()
-
-# ── Cosine similarity thresholds ─────────────────────────────────────────────
-# Embeddings are built on the TEXT part of ITEMDESC only.
-# NUMERIC part must match exactly (case-insensitive, stripped).
-#
-# DUPLICATE_ENGINE_TEXT_THRESHOLD  — used by /Item-Master-duplicate-engine
-#                                    and by the intra-bulk step in /Item-Master-check-duplicate-bulk.
-# VARIANT_CHECK_TEXT_THRESHOLD     — used by /Item-Master-check-duplicate-variant
-#                                    and by the DB/approval step in /Item-Master-check-duplicate-bulk.
-# Approval queue embeddings are computed at runtime only (not cached on disk).
-DUPLICATE_ENGINE_TEXT_THRESHOLD = float(os.environ.get("DUPLICATE_ENGINE_TEXT_THRESHOLD", "0.985"))
-VARIANT_CHECK_TEXT_THRESHOLD = float(os.environ.get("VARIANT_CHECK_TEXT_THRESHOLD", "0.75"))
 
 # Main code / sub code / UOM catalog views (runtime embeddings only; not cached).
 ITEM_MAIN_CODE_VIEW = os.environ.get("ITEM_MAIN_CODE_VIEW", "vw_item_main_code")
@@ -75,16 +56,6 @@ ITEM_SUB_CODE_COL = os.environ.get("ITEM_SUB_CODE_COL", "ItemSubCode_Name")
 UOM_VIEW = os.environ.get("UOM_VIEW", "vw_uom")
 UOM_COL = os.environ.get("UOM_COL", "UOM_Description")
 CATALOG_COL_ID = os.environ.get("CATALOG_COL_ID", "id")
-# Per-catalog cosine thresholds (runtime variant checks; not cached).
-MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
-    os.environ.get("MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD", "0.97")
-)
-SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
-    os.environ.get("SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD", "0.97")
-)
-UOM_VARIANT_CHECK_TEXT_THRESHOLD = float(
-    os.environ.get("UOM_VARIANT_CHECK_TEXT_THRESHOLD", "0.97")
-)
 
 
 def load_dotenv() -> None:
@@ -112,13 +83,9 @@ def load_dotenv() -> None:
     # Refresh derived settings after .env load
     global PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD, PG_SCHEMA, PG_CONNECT_TIMEOUT
     global ITEM_MASTER_VIEW, ITEM_MASTER_APPROVAL_VIEW, ITEM_MASTER_ORDER_BY
-    global DUPLICATE_ENGINE_TEXT_THRESHOLD, VARIANT_CHECK_TEXT_THRESHOLD
-    global VENDOR_MASTER_VIEW, VENDOR_MASTER_ORDER_BY, VENDOR_NAME_TEXT_THRESHOLD
-    global VENDOR_VARIANT_CHECK_NAME_THRESHOLD, VENDOR_MASTER_APPROVAL_VIEW
+    global VENDOR_MASTER_VIEW, VENDOR_MASTER_ORDER_BY, VENDOR_MASTER_APPROVAL_VIEW
     global ITEM_MAIN_CODE_VIEW, ITEM_MAIN_CODE_COL, ITEM_SUB_CODE_VIEW, ITEM_SUB_CODE_COL
     global UOM_VIEW, UOM_COL, CATALOG_COL_ID
-    global MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD, SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD
-    global UOM_VARIANT_CHECK_TEXT_THRESHOLD
     PG_HOST = os.environ.get("PGHOST", PG_HOST)
     PG_PORT = int(os.environ.get("PGPORT", str(PG_PORT)))
     PG_DATABASE = os.environ.get("PGDATABASE", PG_DATABASE)
@@ -129,24 +96,9 @@ def load_dotenv() -> None:
     ITEM_MASTER_VIEW = os.environ.get("ITEM_MASTER_VIEW", ITEM_MASTER_VIEW)
     ITEM_MASTER_APPROVAL_VIEW = os.environ.get("ITEM_MASTER_APPROVAL_VIEW", ITEM_MASTER_APPROVAL_VIEW)
     ITEM_MASTER_ORDER_BY = os.environ.get("ITEM_MASTER_ORDER_BY", ITEM_MASTER_ORDER_BY).strip()
-    DUPLICATE_ENGINE_TEXT_THRESHOLD = float(
-        os.environ.get("DUPLICATE_ENGINE_TEXT_THRESHOLD", str(DUPLICATE_ENGINE_TEXT_THRESHOLD))
-    )
-    VARIANT_CHECK_TEXT_THRESHOLD = float(
-        os.environ.get("VARIANT_CHECK_TEXT_THRESHOLD", str(VARIANT_CHECK_TEXT_THRESHOLD))
-    )
     VENDOR_MASTER_VIEW = os.environ.get("VENDOR_MASTER_VIEW", VENDOR_MASTER_VIEW)
     VENDOR_MASTER_APPROVAL_VIEW = os.environ.get("VENDOR_MASTER_APPROVAL_VIEW", VENDOR_MASTER_APPROVAL_VIEW)
     VENDOR_MASTER_ORDER_BY = os.environ.get("VENDOR_MASTER_ORDER_BY", VENDOR_MASTER_ORDER_BY).strip()
-    VENDOR_NAME_TEXT_THRESHOLD = float(
-        os.environ.get("VENDOR_NAME_TEXT_THRESHOLD", str(VENDOR_NAME_TEXT_THRESHOLD))
-    )
-    VENDOR_VARIANT_CHECK_NAME_THRESHOLD = float(
-        os.environ.get(
-            "VENDOR_VARIANT_CHECK_NAME_THRESHOLD",
-            str(VENDOR_VARIANT_CHECK_NAME_THRESHOLD),
-        )
-    )
     ITEM_MAIN_CODE_VIEW = os.environ.get("ITEM_MAIN_CODE_VIEW", ITEM_MAIN_CODE_VIEW)
     ITEM_MAIN_CODE_COL = os.environ.get("ITEM_MAIN_CODE_COL", ITEM_MAIN_CODE_COL)
     ITEM_SUB_CODE_VIEW = os.environ.get("ITEM_SUB_CODE_VIEW", ITEM_SUB_CODE_VIEW)
@@ -154,24 +106,6 @@ def load_dotenv() -> None:
     UOM_VIEW = os.environ.get("UOM_VIEW", UOM_VIEW)
     UOM_COL = os.environ.get("UOM_COL", UOM_COL)
     CATALOG_COL_ID = os.environ.get("CATALOG_COL_ID", CATALOG_COL_ID)
-    MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
-        os.environ.get(
-            "MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD",
-            str(MAIN_CODE_VARIANT_CHECK_TEXT_THRESHOLD),
-        )
-    )
-    SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD = float(
-        os.environ.get(
-            "SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD",
-            str(SUB_CODE_VARIANT_CHECK_TEXT_THRESHOLD),
-        )
-    )
-    UOM_VARIANT_CHECK_TEXT_THRESHOLD = float(
-        os.environ.get(
-            "UOM_VARIANT_CHECK_TEXT_THRESHOLD",
-            str(UOM_VARIANT_CHECK_TEXT_THRESHOLD),
-        )
-    )
 
 
 load_dotenv()
