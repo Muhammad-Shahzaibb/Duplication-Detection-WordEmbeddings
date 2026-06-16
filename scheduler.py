@@ -81,10 +81,10 @@ def _run_vendor_master_update_embeddings() -> dict[str, Any]:
     logger.info("Scheduler: vendor view rows fetched: %s", len(rows))
     payload = rebuild_vendor_embeddings_cache(rows)
     logger.info(
-        "Scheduler: Vendor-Master-update-embeddings — done | rows=%s dim=%s cache=%s",
+        "Scheduler: Vendor-Master-update-embeddings — done | rows=%s name_dim=%s address_dim=%s",
         payload.get("total_records"),
         payload.get("embedding_dim"),
-        payload.get("cache_file"),
+        payload.get("address_embedding_dim"),
     )
     return payload
 

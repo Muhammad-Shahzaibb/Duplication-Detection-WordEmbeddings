@@ -13,8 +13,11 @@ CACHE_DIR: Path = APP_DIR / "cache"
 
 EMBED_CACHE_FILE: Path = CACHE_DIR / "embeddings_cache.npy"
 
-# Vendor Master name embedding cache.
+# Vendor Master name / address embedding caches + row snapshot (index-aligned).
 EMBED_VENDOR_CACHE_FILE: Path = CACHE_DIR / "vendor_embeddings_cache.npy"
+EMBED_VENDOR_ADDRESS_CACHE_FILE: Path = CACHE_DIR / "vendor_address_embeddings_cache.npy"
+VENDOR_MASTER_ROWS_JSONL: Path = CACHE_DIR / "vendor_final_rows.jsonl"
+VENDOR_MASTER_ROWS_JSON: Path = CACHE_DIR / "vendor_final_rows.json"
 
 # Item Master row cache (text, numeric, display columns; index-aligned with embeddings_cache.npy).
 # Published atomically at the end of /Item-Master-update-embeddings (staging *.staging files during build).

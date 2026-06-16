@@ -171,6 +171,7 @@ class VendorMasterDuplicateEngineResponse(BaseModel):
 
     total_records: int = Field(..., description="Total vendor rows fetched from the view.")
     duplicates_by_NAME: VendorFieldResult = Field(..., description="Duplicate groups detected by Name similarity.")
+    duplicates_by_ADDRESS: VendorFieldResult = Field(..., description="Duplicate groups detected by Address similarity.")
     duplicates_by_CNIC: VendorFieldResult = Field(..., description="Duplicate groups detected by CNIC (normalized).")
     duplicates_by_NTN: VendorFieldResult = Field(..., description="Duplicate groups detected by NTN (normalized).")
     duplicates_by_STRN: VendorFieldResult = Field(..., description="Duplicate groups detected by STRN (normalized).")
@@ -179,14 +180,28 @@ class VendorMasterDuplicateEngineResponse(BaseModel):
 
 
 class VendorMasterUpdateEmbeddingsResponse(BaseModel):
-    """Result of recomputing Vendor Master name embeddings."""
+    """Result of recomputing Vendor Master name and address embeddings."""
 
     total_records: int = Field(..., description="Number of vendor rows embedded.")
-    embedding_dim: int = Field(..., description="Vector dimension (0 if no rows).")
+    embedding_dim: int = Field(..., description="Name vector dimension (0 if no rows).")
     cache_file: str = Field(default="", description="Absolute path to vendor_embeddings_cache.npy.")
     metadata_file: str = Field(default="", description="Absolute path to vendor_embeddings_cache.npy.meta.json.")
+    row_cache_file: str = Field(
+        default="",
+        description="Absolute path to vendor_final_rows.jsonl (row snapshot, index-aligned with caches).",
+    )
+    address_embedding_dim: int = Field(default=0, description="Address vector dimension (0 if no rows).")
+    address_cache_file: str = Field(
+        default="", description="Absolute path to vendor_address_embeddings_cache.npy."
+    )
+    address_metadata_file: str = Field(
+        default="", description="Absolute path to vendor_address_embeddings_cache.npy.meta.json."
+    )
     model: str = Field(..., description="Sentence-transformers model used.")
-    rows_in_metadata: int = Field(..., description="Row count recorded in saved metadata.")
+    rows_in_metadata: int = Field(..., description="Row count recorded in name cache metadata.")
+    address_rows_in_metadata: int = Field(
+        default=0, description="Row count recorded in address cache metadata."
+    )
 
 
 # ─── Vendor Master variant check ───────────────────────────────────────────────
@@ -227,6 +242,10 @@ class VendorVariantDuplicateCheckResponse(BaseModel):
 
 class VendorNameVariantCheckRequest(BaseModel):
     Name: str = Field(..., description="Candidate vendor Name to check for duplicates.")
+
+
+class VendorAddressVariantCheckRequest(BaseModel):
+    Address: str = Field(..., description="Candidate vendor Address to check for duplicates.")
 
 
 class VendorCNICVariantCheckRequest(BaseModel):

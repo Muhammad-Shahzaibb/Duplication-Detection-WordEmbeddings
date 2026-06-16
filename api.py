@@ -52,6 +52,7 @@ from Schemas import (
     ItemMasterVariantDuplicateCheckResponse,
     VariantDuplicateMatch,
     VendorAccountNoVariantCheckRequest,
+    VendorAddressVariantCheckRequest,
     VendorCNICVariantCheckRequest,
     VendorIBANVariantCheckRequest,
     VendorMasterDuplicateEngineResponse,
@@ -77,8 +78,11 @@ from Vendor_Master_Duplicate_Engine import (
     IDX_ACCOUNT_NO,
     IDX_NTN,
     IDX_STRN,
+    embed_vendor_approval_addresses_at_runtime,
     embed_vendor_approval_names_at_runtime,
+    load_vendor_main_address_embeddings_reuse_if_present,
     load_vendor_main_embeddings_reuse_if_present,
+    match_vendor_address_variant,
     match_vendor_name_variant,
     match_vendor_numeric_variant,
     rebuild_vendor_embeddings_cache,
@@ -502,16 +506,20 @@ def item_master_check_duplicate_bulk(
 @app.post(
     "/Vendor-Master-duplicate-engine",
     response_model=VendorMasterDuplicateEngineResponse,
-    summary="Run duplicate detection on Vendor Master view (6 fields checked independently)",
+    summary="Run duplicate detection on Vendor Master view (7 fields checked independently)",
     tags=["VENDOR MASTER APIS"],
 )
 def vendor_master_duplicate_engine(
     threshold: int = ThresholdQuery,
 ) -> VendorMasterDuplicateEngineResponse:
     """
-    Fetches all rows from the Vendor Master view and checks 6 fields independently:
+    Run duplicate detection on the Vendor Master cache bundle (no live DB).
+
+    Uses embeddings and row snapshot from the last ``/Vendor-Master-update-embeddings``
+    run. Checks 7 fields independently:
 
     - **Name**       — embedding cosine similarity (``threshold`` query param, percent 50–100)
+    - **Address**    — embedding cosine similarity (same ``threshold`` as Name)
     - **CNIC**       — normalized exact match (strip special chars + leading zeros)
     - **NTN**        — normalized exact match
     - **STRN**       — normalized exact match
@@ -520,19 +528,18 @@ def vendor_master_duplicate_engine(
 
     Each field result lists its own duplicate groups with row#, id, Name, and the field value.
     """
-    name_threshold = query_threshold_to_cosine(threshold)
+    embedding_threshold = query_threshold_to_cosine(threshold)
     logger.info(
-        "POST /Vendor-Master-duplicate-engine — start (name_threshold=%.2f)",
-        name_threshold,
+        "POST /Vendor-Master-duplicate-engine — start (cache bundle only, embedding_threshold=%.2f)",
+        embedding_threshold,
     )
-    rows = fetch_vendor_master_rows_from_view()
-    logger.info("Vendor view rows fetched: %s", len(rows))
-    payload = run_vendor_master_duplicate_engine(rows, name_threshold=name_threshold)
+    payload = run_vendor_master_duplicate_engine(name_threshold=embedding_threshold)
     logger.info(
         "POST /Vendor-Master-duplicate-engine — done | total=%s "
-        "NAME_groups=%s CNIC_groups=%s NTN_groups=%s STRN_groups=%s ACCT_groups=%s IBAN_groups=%s",
+        "NAME_groups=%s ADDRESS_groups=%s CNIC_groups=%s NTN_groups=%s STRN_groups=%s ACCT_groups=%s IBAN_groups=%s",
         payload.get("total_records"),
         payload.get("duplicates_by_NAME", {}).get("duplicate_groups", 0),
+        payload.get("duplicates_by_ADDRESS", {}).get("duplicate_groups", 0),
         payload.get("duplicates_by_CNIC", {}).get("duplicate_groups", 0),
         payload.get("duplicates_by_NTN", {}).get("duplicate_groups", 0),
         payload.get("duplicates_by_STRN", {}).get("duplicate_groups", 0),
@@ -545,23 +552,29 @@ def vendor_master_duplicate_engine(
 @app.post(
     "/Vendor-Master-update-embeddings",
     response_model=VendorMasterUpdateEmbeddingsResponse,
-    summary="Refresh Vendor Master name embedding cache from the vendor view",
+    summary="Refresh Vendor Master name and address embedding caches from the vendor view",
     tags=["VENDOR MASTER APIS"],
 )
 def vendor_master_update_embeddings() -> VendorMasterUpdateEmbeddingsResponse:
     """
-    Forces a full recomputation of the Vendor Name embedding cache
-    (``cache/vendor_embeddings_cache.npy``).  Call this after bulk vendor data changes.
+    Forces a full recomputation of the Vendor Master cache bundle from the DB view.
+
+    Writes staging files while embedding, then publishes ``vendor_embeddings_cache.npy``,
+    ``vendor_address_embeddings_cache.npy``, and ``vendor_final_rows.jsonl`` on success.
     """
-    logger.info("POST /Vendor-Master-update-embeddings — start (force COMPUTE)")
+    logger.info("POST /Vendor-Master-update-embeddings — start (force COMPUTE name + address)")
     rows = fetch_vendor_master_rows_from_view()
     logger.info("Vendor view rows fetched: %s", len(rows))
     payload = rebuild_vendor_embeddings_cache(rows)
     logger.info(
-        "POST /Vendor-Master-update-embeddings — done | rows=%s dim=%s cache=%s",
+        "POST /Vendor-Master-update-embeddings — done | rows=%s name_dim=%s address_dim=%s "
+        "name_cache=%s address_cache=%s row_cache=%s",
         payload.get("total_records"),
         payload.get("embedding_dim"),
+        payload.get("address_embedding_dim"),
         payload.get("cache_file"),
+        payload.get("address_cache_file"),
+        payload.get("row_cache_file"),
     )
     return VendorMasterUpdateEmbeddingsResponse.model_validate(payload)
 
@@ -691,6 +704,51 @@ def vendor_master_check_duplicate_name(
         "POST /Vendor-Master-check-duplicate-Name — done | threshold=%.3f status=%s matches=%s (db=%s approval=%s)",
         name_threshold,
         status, len(matches),
+        sum(1 for m in matches if m.location == "db"),
+        sum(1 for m in matches if m.location == "approval"),
+    )
+    return VendorVariantDuplicateCheckResponse(status=status, matches=matches)
+
+
+@app.post(
+    "/Vendor-Master-check-duplicate-Address",
+    response_model=VendorVariantDuplicateCheckResponse,
+    summary="Check if a candidate vendor Address is a duplicate (embedding cosine similarity)",
+    tags=["VENDOR MASTER APIS"],
+)
+def vendor_master_check_duplicate_address(
+    req: VendorAddressVariantCheckRequest,
+    threshold: int = ThresholdQuery,
+) -> VendorVariantDuplicateCheckResponse:
+    address_threshold = query_threshold_to_cosine(threshold)
+    logger.info(
+        "POST /Vendor-Master-check-duplicate-Address — start | Address=%r threshold=%.2f",
+        req.Address,
+        address_threshold,
+    )
+
+    db_mat, db_rows = load_vendor_main_address_embeddings_reuse_if_present()
+    logger.info("Vendor Address check: db_rows=%s (cache aligned)", len(db_rows))
+
+    ap_mat, approval_rows = embed_vendor_approval_addresses_at_runtime()
+    logger.info("Vendor Address check: approval_rows=%s (runtime)", len(approval_rows))
+
+    raw_matches = match_vendor_address_variant(
+        req.Address,
+        db_rows,
+        db_mat,
+        approval_rows,
+        ap_mat,
+        threshold=address_threshold,
+    )
+    matches = [VendorVariantMatch.model_validate(m) for m in raw_matches]
+    status = "duplicate" if matches else "unique"
+    logger.info(
+        "POST /Vendor-Master-check-duplicate-Address — done | threshold=%.3f status=%s matches=%s "
+        "(db=%s approval=%s)",
+        address_threshold,
+        status,
+        len(matches),
         sum(1 for m in matches if m.location == "db"),
         sum(1 for m in matches if m.location == "approval"),
     )

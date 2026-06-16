@@ -279,12 +279,14 @@ def fetch_vendor_master_rows_from_view(
     col_strn: str = "SalesTaxNo",
     col_account_no: str = "AccountNo",
     col_iban: str = "IbanNO",
+    col_address: str = "Address",
 ) -> list[tuple[Any, ...]]:
     """
-    Return vendor rows as (id, Name, CNIC, NTN, SalesTaxNo, AccountNo, IbanNO) tuples
-    in **deterministic** order (``VENDOR_MASTER_ORDER_BY`` from env/Config, or ``id`` by default).
+    Return vendor rows as tuples in **deterministic** order
+    (``VENDOR_MASTER_ORDER_BY`` from env/Config, or ``id`` by default).
 
-    Tuple indices: 0=id, 1=Name, 2=CNIC, 3=NTN, 4=SalesTaxNo, 5=AccountNo, 6=IbanNO
+    Tuple indices: 0=id, 1=Name, 2=CNIC, 3=NTN, 4=SalesTaxNo, 5=AccountNo,
+    6=IbanNO, 7=Address
     """
     h = host or PG_HOST
     p = int(port or PG_PORT)
@@ -307,7 +309,7 @@ def fetch_vendor_master_rows_from_view(
         f'{_sql_quote_ident(col_id)}, {_sql_quote_ident(col_name)}, '
         f'{_sql_quote_ident(col_cnic)}, {_sql_quote_ident(col_ntn)}, '
         f'{_sql_quote_ident(col_strn)}, {_sql_quote_ident(col_account_no)}, '
-        f'{_sql_quote_ident(col_iban)}'
+        f'{_sql_quote_ident(col_iban)}, {_sql_quote_ident(col_address)}'
     )
     sql = f"SELECT {select_cols} FROM {ident} ORDER BY {order_by}{limit_sql}"
 
