@@ -29,7 +29,7 @@ from Item_Master_Duplicate_Engine import (
     row_to_schema_json,
     run_item_master_duplicate_engine,
 )
-from item_spell import preprocess_variant_text
+from item_spell import normalize_variant_text, variant_check_passes
 from embeddings import (
     EMBED_CACHE_FILE,
     EMBED_MODEL,
@@ -235,6 +235,20 @@ def item_master_update_embeddings() -> ItemMasterUpdateEmbeddingsResponse:
     return ItemMasterUpdateEmbeddingsResponse.model_validate(payload)
 
 
+def _embed_item_master_variant_candidate(
+    prepared_desc: str,
+) -> tuple[np.ndarray, str, str]:
+    """Embed one prepared ITEMDESC; returns (vector, numeric, embedding_text)."""
+    candidate_schema = row_to_schema_json(item_description=prepared_desc)
+    candidate_min = schema_records_to_minimized([candidate_schema])[0]
+    candidate_text = build_embedding_text(candidate_min)
+    cand_numeric = candidate_min.get("numeric") or ""
+    cand_vec = embed_texts_local([candidate_text], model_id=EMBED_MODEL, batch_size=1)
+    if cand_vec.ndim != 2 or cand_vec.shape[0] != 1:
+        raise RuntimeError("Unexpected embedding output shape for candidate row")
+    return cand_vec[0], cand_numeric, candidate_text
+
+
 @app.post(
     "/Item-Master-check-duplicate-variant",
     response_model=ItemMasterVariantDuplicateCheckResponse,
@@ -252,29 +266,12 @@ def item_master_check_duplicate_variant(
         text_threshold,
     )
 
-    prepared_desc = preprocess_variant_text(req.ITEMDESC)
-    if prepared_desc != clean_str(req.ITEMDESC):
-        logger.info(
-            "Variant check preprocessing: %r -> %r",
-            req.ITEMDESC,
-            prepared_desc,
-        )
+    passes = variant_check_passes(req.ITEMDESC)
+    if not passes:
+        logger.info("POST /Item-Master-check-duplicate-variant — done | status=unique (empty input)")
+        return ItemMasterVariantDuplicateCheckResponse(status="unique", matches=[])
 
-    candidate_schema = row_to_schema_json(item_description=prepared_desc)
-    candidate_min = schema_records_to_minimized([candidate_schema])[0]
-    candidate_text = build_embedding_text(candidate_min)
-    cand_numeric = candidate_min.get("numeric") or ""
-    logger.info("Candidate embedding text: %r | numeric: %r", candidate_text, cand_numeric)
-
-    cand_vec = embed_texts_local([candidate_text], model_id=EMBED_MODEL, batch_size=1)
-    if cand_vec.ndim != 2 or cand_vec.shape[0] != 1:
-        raise RuntimeError("Unexpected embedding output shape for candidate row")
-    cand_vec = cand_vec[0]
-    logger.info("Candidate vector embedded (dim=%s)", cand_vec.shape[0])
-
-    matches: list[VariantDuplicateMatch] = []
-
-    # --- Main DB: full cache bundle (embeddings + row snapshot; no live DB) ---
+    # --- Main DB + approval: load/embed once per request ---
     logger.info(
         "DB cache [%s]: loading embeddings + row snapshot (reuse only, no compute)",
         EMBED_CACHE_FILE,
@@ -287,62 +284,89 @@ def item_master_check_duplicate_variant(
             "Main embedding cache model does not match the active embedding model. "
             "Run /Item-Master-update-embeddings to refresh the cache."
         )
-    if int(meta_main.get("dim", -1)) != int(cand_vec.shape[0]):
-        raise RuntimeError(
-            "Main embedding cache dimension does not match candidate embedding. "
-            "Run /Item-Master-update-embeddings to refresh the cache."
-        )
 
-    main_numerics = [(r.get("numeric") or "") for r in main_row_cache]
-    main_itemdescs = [clean_str(r.get("ITEMDESC", "")) for r in main_row_cache]
-    db_matches = _threshold_variant_matches(
-        mat_main, main_itemdescs, main_numerics, cand_vec, cand_numeric,
-        location="db",
-        text_threshold=text_threshold,
-    )
-    matches.extend(db_matches)
-    logger.info(
-        "DB embeddings: matches=%s (text_threshold=%.2f, cand_numeric=%r)",
-        len(db_matches), text_threshold, cand_numeric,
-    )
-
-    # --- Approval embeddings (runtime only; never cached) ---
     mat_ap, approval_tuples = embed_item_master_approval_view_at_runtime()
     if approval_tuples:
-        if int(mat_ap.shape[1]) != int(cand_vec.shape[0]):
-            raise RuntimeError("Approval runtime embedding dimension does not match candidate embedding.")
-        approval_numerics = _extract_tuple_numerics(approval_tuples)
-        approval_itemdescs = [
-            normalize_item_description(str(t[3]) if t[3] is not None else "")
-            for t in approval_tuples
-        ]
-        ap_matches = _threshold_variant_matches(
-            mat_ap, approval_itemdescs, approval_numerics, cand_vec, cand_numeric,
-            location="approval",
-            text_threshold=text_threshold,
-        )
-        matches.extend(ap_matches)
-        logger.info(
-            "Approval embeddings (runtime): rows=%s matches=%s (text_threshold=%.2f, cand_numeric=%r)",
-            len(approval_tuples),
-            len(ap_matches),
-            text_threshold,
-            cand_numeric,
-        )
+        logger.info("Approval embeddings (runtime): rows=%s", len(approval_tuples))
     else:
         logger.info("Approval embeddings: skipped (approval view has 0 rows)")
 
-    if not matches:
-        logger.info("POST /Item-Master-check-duplicate-variant — done | status=unique")
-        return ItemMasterVariantDuplicateCheckResponse(status="unique", matches=[])
-
-    logger.info(
-        "POST /Item-Master-check-duplicate-variant — done | status=duplicate matches=%s (db=%s approval=%s)",
-        len(matches),
-        sum(1 for m in matches if m.location == "db"),
-        sum(1 for m in matches if m.location == "approval"),
+    main_numerics = [(r.get("numeric") or "") for r in main_row_cache]
+    main_itemdescs = [clean_str(r.get("ITEMDESC", "")) for r in main_row_cache]
+    approval_numerics = _extract_tuple_numerics(approval_tuples) if approval_tuples else []
+    approval_itemdescs = (
+        [
+            normalize_item_description(str(t[3]) if t[3] is not None else "")
+            for t in approval_tuples
+        ]
+        if approval_tuples
+        else []
     )
-    return ItemMasterVariantDuplicateCheckResponse(status="duplicate", matches=matches)
+
+    for used_spell, prepared_desc in passes:
+        if used_spell:
+            logger.info(
+                "Variant check spell fallback pass: %r -> %r",
+                normalize_variant_text(req.ITEMDESC),
+                prepared_desc,
+            )
+        else:
+            logger.info("Variant check no-spell pass: prepared=%r", prepared_desc)
+
+        cand_vec, cand_numeric, candidate_text = _embed_item_master_variant_candidate(prepared_desc)
+        logger.info("Candidate embedding text: %r | numeric: %r", candidate_text, cand_numeric)
+
+        if int(meta_main.get("dim", -1)) != int(cand_vec.shape[0]):
+            raise RuntimeError(
+                "Main embedding cache dimension does not match candidate embedding. "
+                "Run /Item-Master-update-embeddings to refresh the cache."
+            )
+        if approval_tuples and int(mat_ap.shape[1]) != int(cand_vec.shape[0]):
+            raise RuntimeError("Approval runtime embedding dimension does not match candidate embedding.")
+
+        matches: list[VariantDuplicateMatch] = []
+        db_matches = _threshold_variant_matches(
+            mat_main, main_itemdescs, main_numerics, cand_vec, cand_numeric,
+            location="db",
+            text_threshold=text_threshold,
+        )
+        matches.extend(db_matches)
+        logger.info(
+            "DB embeddings (%s): matches=%s (text_threshold=%.2f, cand_numeric=%r)",
+            "spell" if used_spell else "no-spell",
+            len(db_matches),
+            text_threshold,
+            cand_numeric,
+        )
+
+        if approval_tuples:
+            ap_matches = _threshold_variant_matches(
+                mat_ap, approval_itemdescs, approval_numerics, cand_vec, cand_numeric,
+                location="approval",
+                text_threshold=text_threshold,
+            )
+            matches.extend(ap_matches)
+            logger.info(
+                "Approval embeddings (%s): matches=%s (text_threshold=%.2f, cand_numeric=%r)",
+                "spell" if used_spell else "no-spell",
+                len(ap_matches),
+                text_threshold,
+                cand_numeric,
+            )
+
+        if matches:
+            logger.info(
+                "POST /Item-Master-check-duplicate-variant — done | status=duplicate "
+                "pass=%s matches=%s (db=%s approval=%s)",
+                "spell" if used_spell else "no-spell",
+                len(matches),
+                sum(1 for m in matches if m.location == "db"),
+                sum(1 for m in matches if m.location == "approval"),
+            )
+            return ItemMasterVariantDuplicateCheckResponse(status="duplicate", matches=matches)
+
+    logger.info("POST /Item-Master-check-duplicate-variant — done | status=unique")
+    return ItemMasterVariantDuplicateCheckResponse(status="unique", matches=[])
 
 
 @app.post(

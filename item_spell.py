@@ -114,16 +114,47 @@ def correct_itemdesc_spelling(desc: str) -> str:
     return " ".join(corrected)
 
 
-def preprocess_variant_text(text: str) -> str:
+def normalize_variant_text(text: str) -> str:
     """
-    Variant-check pipeline: spell-correct then normalize (spaces, punctuation, hyphens).
+    Variant-check normalization only (spaces, punctuation, hyphens) — no SymSpell.
 
-    Used for Item Master ITEMDESC and catalog variant APIs (main code, sub code, UOM).
+    Used for the first duplicate-check pass so raw tokens like ``KINT`` are not
+    altered before matching cached / approval rows.
     """
     from jsonify import normalize_item_description
 
     s = clean_str(text)
     if not s:
         return s
-    s = correct_itemdesc_spelling(s)
     return normalize_item_description(s)
+
+
+def preprocess_variant_text(text: str) -> str:
+    """
+    Full variant-check pipeline: spell-correct then normalize.
+
+    Used for the second pass when the no-spell pass finds no duplicate.
+    """
+    s = clean_str(text)
+    if not s:
+        return s
+    s = correct_itemdesc_spelling(s)
+    return normalize_variant_text(s)
+
+
+def variant_check_passes(raw: str) -> list[tuple[bool, str]]:
+    """
+    Ordered (``used_spell``, prepared_text) attempts for variant duplicate APIs.
+
+    Always tries normalization without spell first; spell correction runs only
+    when it would change the prepared text.
+    """
+    stripped = clean_str(raw)
+    if not stripped:
+        return []
+    no_spell = normalize_variant_text(stripped)
+    spell = preprocess_variant_text(stripped)
+    passes: list[tuple[bool, str]] = [(False, no_spell)]
+    if spell != no_spell:
+        passes.append((True, spell))
+    return passes
