@@ -60,6 +60,11 @@ UOM_VIEW = os.environ.get("UOM_VIEW", "vw_uom")
 UOM_COL = os.environ.get("UOM_COL", "UOM_Description")
 CATALOG_COL_ID = os.environ.get("CATALOG_COL_ID", "id")
 
+# Hugging Face model id (stored in embedding cache metadata; used when no local path).
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/all-MiniLM-L12-v2")
+# Optional: folder with modules.json (Docker/K8s offline). Empty = download from Hub on first use.
+EMBED_MODEL_PATH = os.environ.get("EMBED_MODEL_PATH", "").strip()
+
 
 def load_dotenv() -> None:
     """Load KEY=VALUE pairs from .env in APP_DIR or cwd (does not override existing env)."""
@@ -88,7 +93,7 @@ def load_dotenv() -> None:
     global ITEM_MASTER_VIEW, ITEM_MASTER_APPROVAL_VIEW, ITEM_MASTER_ORDER_BY
     global VENDOR_MASTER_VIEW, VENDOR_MASTER_ORDER_BY, VENDOR_MASTER_APPROVAL_VIEW
     global ITEM_MAIN_CODE_VIEW, ITEM_MAIN_CODE_COL, ITEM_SUB_CODE_VIEW, ITEM_SUB_CODE_COL
-    global UOM_VIEW, UOM_COL, CATALOG_COL_ID
+    global UOM_VIEW, UOM_COL, CATALOG_COL_ID, EMBED_MODEL, EMBED_MODEL_PATH
     PG_HOST = os.environ.get("PGHOST", PG_HOST)
     PG_PORT = int(os.environ.get("PGPORT", str(PG_PORT)))
     PG_DATABASE = os.environ.get("PGDATABASE", PG_DATABASE)
@@ -109,6 +114,8 @@ def load_dotenv() -> None:
     UOM_VIEW = os.environ.get("UOM_VIEW", UOM_VIEW)
     UOM_COL = os.environ.get("UOM_COL", UOM_COL)
     CATALOG_COL_ID = os.environ.get("CATALOG_COL_ID", CATALOG_COL_ID)
+    EMBED_MODEL = os.environ.get("EMBED_MODEL", EMBED_MODEL)
+    EMBED_MODEL_PATH = os.environ.get("EMBED_MODEL_PATH", EMBED_MODEL_PATH).strip()
 
 
 load_dotenv()
