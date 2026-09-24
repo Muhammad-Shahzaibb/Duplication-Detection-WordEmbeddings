@@ -15,12 +15,15 @@ from sentence_transformers import SentenceTransformer
 
 from logging_setup import get_logger
 from Config import EMBED_CACHE_FILE as _DEFAULT_EMBED_CACHE_PATH
-from Config import EMBED_MODEL, EMBED_MODEL_PATH
 
 # ─────────────────────────────────────────────
 #  EMBEDDINGS CONFIG — SentenceTransformers + FAISS
 # ─────────────────────────────────────────────
 
+# EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # HuggingFace model id (downloads once)
+# EMBED_BATCH = 256  # encoding batch size (CPU)
+
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L12-v2" # HuggingFace model id (downloads once)
 EMBED_BATCH = 256  # encoding batch size (CPU)
 
 
@@ -35,31 +38,10 @@ CacheAction = Literal["reuse", "compute", "missing"]
 _EMBEDDER: SentenceTransformer | None = None
 
 
-def _resolve_sentence_transformer_source() -> tuple[str, bool]:
-    """
-    Return (path_or_hub_id, local_files_only).
-
-    When ``EMBED_MODEL_PATH`` points at a saved SentenceTransformer folder
-    (contains ``modules.json``), load offline. Otherwise use ``EMBED_MODEL`` hub id.
-    """
-    if EMBED_MODEL_PATH:
-        local = Path(EMBED_MODEL_PATH)
-        if local.is_dir() and (local / "modules.json").is_file():
-            return str(local.resolve()), True
-        logger.warning(
-            "EMBED_MODEL_PATH=%r is missing or has no modules.json — falling back to hub id %r",
-            EMBED_MODEL_PATH,
-            EMBED_MODEL,
-        )
-    return EMBED_MODEL, False
-
-
 def get_embedder(model_id: str = EMBED_MODEL) -> SentenceTransformer:
     """
-    Loads the embedding model once and reuses it.
-
-    Production: set ``EMBED_MODEL_PATH=/app/models/all-MiniLM-L12-v2`` (offline).
-    Dev: omit ``EMBED_MODEL_PATH`` to download ``EMBED_MODEL`` from Hugging Face once.
+    Loads the HF embedding model once and reuses it.
+    On first run, this downloads the model to the HuggingFace cache on disk.
     """
     global _EMBEDDER
     if _EMBEDDER is None:
@@ -71,15 +53,7 @@ def get_embedder(model_id: str = EMBED_MODEL) -> SentenceTransformer:
             torch.set_num_interop_threads(2)
         except Exception:
             pass
-        source, local_only = _resolve_sentence_transformer_source()
-        if model_id != EMBED_MODEL and source == EMBED_MODEL:
-            logger.debug("get_embedder model_id=%r ignored; using configured source", model_id)
-        logger.info(
-            "Loading SentenceTransformer from %r (local_files_only=%s)",
-            source,
-            local_only,
-        )
-        _EMBEDDER = SentenceTransformer(source, device="cpu", local_files_only=local_only)
+        _EMBEDDER = SentenceTransformer(model_id, device="cpu")
     return _EMBEDDER
 
 
