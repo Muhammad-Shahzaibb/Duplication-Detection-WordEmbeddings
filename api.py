@@ -369,6 +369,130 @@ def item_master_check_duplicate_variant(
     return ItemMasterVariantDuplicateCheckResponse(status="unique", matches=[])
 
 
+_REPLICA_DEFAULT_THRESHOLD = 0.96
+
+
+@app.post(
+    "/Item-Master-check-duplicate-variant-replica",
+    response_model=ItemMasterVariantDuplicateCheckResponse,
+    summary="Check if a single candidate ITEMDESC is an exact duplicate (fixed 96% threshold)",
+    tags=["ITEM MASTER APIS"],
+)
+def item_master_check_duplicate_variant_replica(
+    req: ItemMasterVariantDuplicateCheckRequest,
+) -> ItemMasterVariantDuplicateCheckResponse:
+    """Replica of /Item-Master-check-duplicate-variant with a fixed default threshold of 96% (0.96).
+    No threshold query parameter is accepted; 0.96 is always used."""
+    text_threshold = _REPLICA_DEFAULT_THRESHOLD
+    logger.info(
+        "POST /Item-Master-check-duplicate-variant-replica — start | ITEMDESC=%r threshold=%.2f",
+        req.ITEMDESC,
+        text_threshold,
+    )
+
+    passes = variant_check_passes(req.ITEMDESC)
+    if not passes:
+        logger.info("POST /Item-Master-check-duplicate-variant-replica — done | status=unique (empty input)")
+        return ItemMasterVariantDuplicateCheckResponse(status="unique", matches=[])
+
+    # --- Main DB + approval: load/embed once per request ---
+    logger.info(
+        "DB cache [%s]: loading embeddings + row snapshot (reuse only, no compute)",
+        EMBED_CACHE_FILE,
+    )
+    mat_main, meta_main, main_row_cache = load_item_master_main_db_cache()
+    logger.info("DB cache: REUSED | rows=%s", int(mat_main.shape[0]))
+
+    if str(meta_main.get("model", "")) != EMBED_MODEL:
+        raise RuntimeError(
+            "Main embedding cache model does not match the active embedding model. "
+            "Run /Item-Master-update-embeddings to refresh the cache."
+        )
+
+    mat_ap, approval_tuples = embed_item_master_approval_view_at_runtime()
+    if approval_tuples:
+        logger.info("Approval embeddings (runtime): rows=%s", len(approval_tuples))
+    else:
+        logger.info("Approval embeddings: skipped (approval view has 0 rows)")
+
+    main_numerics = [(r.get("numeric") or "") for r in main_row_cache]
+    main_itemdescs = [clean_str(r.get("ITEMDESC", "")) for r in main_row_cache]
+    approval_numerics = _extract_tuple_numerics(approval_tuples) if approval_tuples else []
+    approval_itemdescs = (
+        [
+            normalize_item_description(str(t[3]) if t[3] is not None else "")
+            for t in approval_tuples
+        ]
+        if approval_tuples
+        else []
+    )
+
+    for used_spell, prepared_desc in passes:
+        if used_spell:
+            logger.info(
+                "Variant check spell fallback pass: %r -> %r",
+                normalize_variant_text(req.ITEMDESC),
+                prepared_desc,
+            )
+        else:
+            logger.info("Variant check no-spell pass: prepared=%r", prepared_desc)
+
+        cand_vec, cand_numeric, candidate_text = _embed_item_master_variant_candidate(prepared_desc)
+        logger.info("Candidate embedding text: %r | numeric: %r", candidate_text, cand_numeric)
+
+        if int(meta_main.get("dim", -1)) != int(cand_vec.shape[0]):
+            raise RuntimeError(
+                "Main embedding cache dimension does not match candidate embedding. "
+                "Run /Item-Master-update-embeddings to refresh the cache."
+            )
+        if approval_tuples and int(mat_ap.shape[1]) != int(cand_vec.shape[0]):
+            raise RuntimeError("Approval runtime embedding dimension does not match candidate embedding.")
+
+        matches: list[VariantDuplicateMatch] = []
+        db_matches = _threshold_variant_matches(
+            mat_main, main_itemdescs, main_numerics, cand_vec, cand_numeric,
+            location="db",
+            text_threshold=text_threshold,
+        )
+        matches.extend(db_matches)
+        logger.info(
+            "DB embeddings (%s): matches=%s (text_threshold=%.2f, cand_numeric=%r)",
+            "spell" if used_spell else "no-spell",
+            len(db_matches),
+            text_threshold,
+            cand_numeric,
+        )
+
+        if approval_tuples:
+            ap_matches = _threshold_variant_matches(
+                mat_ap, approval_itemdescs, approval_numerics, cand_vec, cand_numeric,
+                location="approval",
+                text_threshold=text_threshold,
+            )
+            matches.extend(ap_matches)
+            logger.info(
+                "Approval embeddings (%s): matches=%s (text_threshold=%.2f, cand_numeric=%r)",
+                "spell" if used_spell else "no-spell",
+                len(ap_matches),
+                text_threshold,
+                cand_numeric,
+            )
+
+        if matches:
+            logger.info(
+                "POST /Item-Master-check-duplicate-variant-replica — done | status=duplicate "
+                "pass=%s matches=%s (db=%s approval=%s)",
+                "spell" if used_spell else "no-spell",
+                len(matches),
+                sum(1 for m in matches if m.location == "db"),
+                sum(1 for m in matches if m.location == "approval"),
+            )
+            return ItemMasterVariantDuplicateCheckResponse(status="duplicate", matches=matches)
+
+    logger.info("POST /Item-Master-check-duplicate-variant-replica — done | status=unique")
+    return ItemMasterVariantDuplicateCheckResponse(status="unique", matches=[])
+
+
 @app.post(
     "/Item-Master-check-duplicate-bulk",
     response_model=ItemMasterBulkDuplicateCheckResponse,
