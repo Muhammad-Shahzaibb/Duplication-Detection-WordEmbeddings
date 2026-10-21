@@ -369,7 +369,7 @@ def item_master_check_duplicate_variant(
     return ItemMasterVariantDuplicateCheckResponse(status="unique", matches=[])
 
 
-_REPLICA_DEFAULT_THRESHOLD = 0.96
+_REPLICA_DEFAULT_THRESHOLD = 0.97
 
 
 @app.post(
